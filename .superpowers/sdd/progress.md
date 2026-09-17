@@ -60,11 +60,13 @@ RESOLVED by controller, no code change needed:
   supported ("Key: max_completion_tokens, Optional, integer, 1 or above"). The 16384 cap applies.
   Not a defect; does NOT need to go in the manual matrix.
 
-OPEN - needs human decision:
+RESOLVED by human (accept, no code change):
 - Partially-typed OpenRouter key kills all answers. MainView saves on every @input keystroke, and
   precedence is key PRESENCE. Typing (not pasting) a key means `openrouterApiKey: "s"` after one
   keystroke -> every turn 401s, Groq is bypassed, Gemini output suppressed. Paste is one event, so the
   common path is safe. Same pattern as the existing Groq field.
+  DECISION: accepted as-is. It matches the existing Groq field's behavior, and pasting (the normal
+  path) is unaffected. No code change. If the Groq field is ever debounced, do both together.
 
 BLOCKING MERGE:
 - Task 8 manual 4x3 matrix has not been run. Requires live audio + real API calls.
