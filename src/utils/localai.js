@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { getSystemPrompt } = require('./prompts');
 const { sendToRenderer, initializeNewSession, saveConversationTurn } = require('./gemini');
+const { streamChatCompletion } = require('./openaiCompatible');
 const {
     ensureNativeBinary,
     ensureLlamaModel,
@@ -183,34 +184,6 @@ async function handleSpeechEnd(audioData) {
     }
 }
 
-async function readStreamingResponse(response, onText) {
-    const decoder = new TextDecoder();
-    let pendingText = '';
-    let fullText = '';
-
-    for await (const chunk of response.body) {
-        pendingText += decoder.decode(chunk, { stream: true });
-        const lines = pendingText.split('\n');
-        pendingText = lines.pop() || '';
-
-        for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-
-            const data = line.slice(6).trim();
-            if (!data || data === '[DONE]') continue;
-
-            const event = JSON.parse(data);
-            const token = event.choices?.[0]?.delta?.content || '';
-            if (!token) continue;
-
-            fullText += token;
-            onText(fullText);
-        }
-    }
-
-    return fullText;
-}
-
 async function requestLlama(messages, onText) {
     if (!llamaBaseUrl) {
         throw new Error('Llama server is not running');
@@ -235,7 +208,11 @@ async function requestLlama(messages, onText) {
         throw new Error(`Llama server returned HTTP ${response.status}: ${errorText}`);
     }
 
-    return readStreamingResponse(response, onText);
+    // Shared with the Groq/OpenRouter paths: buffers partial frames across chunk boundaries,
+    // drains the final frame when a stream closes without a trailing newline, and survives a
+    // malformed frame instead of aborting the whole response.
+    const { fullText } = await streamChatCompletion(response, { onText });
+    return fullText;
 }
 
 async function sendToLlama(transcription) {
