@@ -408,6 +408,8 @@ git commit -m "feat: add provider descriptors and shared chat request builder"
   - `handlers` — `{ onText?, onChunk?, onEvent?, onParseError? }`. `onText(displayText)` receives the cumulative thinking-stripped text and is called only when that text is non-empty.
 
 > **Deliberate deviation, flag at review:** the existing inline loops in `sendToGroq`/`sendImageToGroq` split each network chunk on `\n` without carrying a partial trailing line into the next chunk, so a JSON frame split across two TCP reads is silently dropped as a parse error. This implementation buffers the partial line, matching the correct pattern already used by `readStreamingResponse` in `src/utils/localai.js:186-208`. It makes the Groq path strictly more reliable; it does not change any user-visible behavior other than dropping fewer tokens.
+>
+> **Amended during execution:** review found the first implementation still dropped a final frame when a stream closed without a trailing newline — the loop broke on `done` without draining `pendingLine`. The same gap exists in the cited `localai.js` reference. The shipped version hoists the per-line body into a `processLine` closure and calls it once more after the loop. Covered by the test 'processes a final frame with no trailing newline'.
 
 - [ ] **Step 1: Write the failing tests**
 
