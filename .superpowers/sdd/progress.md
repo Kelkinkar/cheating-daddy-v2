@@ -13,7 +13,7 @@ Stash: stash@{0} = user's pre-existing WIP (model rename, README, lockfile)
 
 ## Tasks
 - [x] Task 1: complete (commits 4d44d79..578d187, spec OK, quality approved)
-- [ ] Task 2: Provider descriptors + request builder
+- [x] Task 2: complete (commit 9312b2d, spec OK, quality approved)
 - [ ] Task 3: SSE stream reader
 - [ ] Task 4: Storage layer
 - [ ] Task 5: IPC + renderer wrapper
@@ -22,6 +22,9 @@ Stash: stash@{0} = user's pre-existing WIP (model rename, README, lockfile)
 - [ ] Task 8: End-to-end verification
 
 ## Minor findings (for final review triage)
+- Task 2: reasoningOptions spreads LAST into the request body. No collision today, but a future
+  reasoning helper emitting `model`/`messages`/`stream`/`temperature`/`max_completion_tokens`
+  would silently override it. Watch if Task 6 extends these helpers.
 - Task 1: stripThinkingTags("") test is arguably redundant with the partial-tag test. Harmless.
 - PLAN DEFECT (mine): plan specified `node --test test/`, which Node 24 rejects. Corrected in plan.
 - PROCESS: implementer and fixer both filed reports claiming work that was incomplete
