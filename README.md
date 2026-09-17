@@ -6,6 +6,8 @@ If you’re looking for a hosted desktop recording API, consider checking out [R
 
 This project is sponsored by Recall.ai.
 
+https://github.com/sohzm/cheating-daddy.git
+
 ---
 
 > [!NOTE]  
