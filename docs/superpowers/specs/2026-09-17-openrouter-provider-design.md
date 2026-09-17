@@ -175,16 +175,15 @@ openrouterImageModel: 'qwen/qwen3.8-27b',
 `qwen/qwen3.8-27b` was verified present in OpenRouter's live catalog with
 `input_modalities: ['text', 'image', 'video']`, so it is valid for both the text and the image path.
 
-**`disableGroqThinking` → `disableThinking`.** The checkbox is already labelled just "Disable thinking"
-in the UI and now governs both providers, so the stored key is renamed with a read-time fallback:
+**`disableGroqThinking` keeps its name** and now governs both providers. The checkbox is already
+labelled just "Disable thinking" in the UI, so nothing user-facing changes. Renaming the stored key to
+`disableThinking` was considered and rejected: it is a cosmetic gain that would touch eight lines
+across three files and introduce the design's only non-additive schema change, for no functional
+benefit. A comment at the `DEFAULT_CONFIG` declaration records that the key is provider-agnostic
+despite its name.
 
-```js
-const thinkingDisabled = config.disableThinking ?? config.disableGroqThinking ?? true;
-```
-
-> This is the one schema change in the design that is not purely additive. The fallback means existing
-> users keep their saved setting. If it is unwanted, keeping `disableGroqThinking` as the stored name
-> works identically and touches eight fewer lines.
+This keeps the storage schema **purely additive**: two new config keys, one new credential, nothing
+renamed, nothing removed.
 
 ### New storage surface
 
@@ -300,7 +299,7 @@ double-generation failure mode this precedence rule exists to prevent.
 |---|---|
 | `src/utils/openaiCompatible.js` | **New.** Pure provider descriptors, request builder, SSE stream reader, thinking-tag stripper |
 | `src/utils/gemini.js` | `getAnswerProvider()` replaces `hasGroqKey()`; `sendToGroq`/`sendImageToGroq` collapse into `sendTextToProvider`/`sendImageToProvider`; six call sites updated |
-| `src/storage.js` | `openrouterApiKey` credential; two config defaults; `getOpenRouterApiKey`/`setOpenRouterApiKey`; `disableThinking` with fallback |
+| `src/storage.js` | `openrouterApiKey` credential; two config defaults; `getOpenRouterApiKey`/`setOpenRouterApiKey` (schema purely additive) |
 | `src/index.js` | Two IPC handlers |
 | `src/utils/renderer.js` | Two storage-wrapper methods |
 | `src/components/views/MainView.js` | Three fields, three state props, three handlers, summary + hint text |
