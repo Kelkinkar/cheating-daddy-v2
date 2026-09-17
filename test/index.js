@@ -1,0 +1,1 @@
+require('./openaiCompatible.test.js');
