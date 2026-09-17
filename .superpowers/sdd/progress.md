@@ -26,7 +26,7 @@ Stash: stash@{0} = user's pre-existing WIP (model rename, README, lockfile)
 - [x] Task 5: complete (commit 1344362, spec OK, quality approved, no findings)
 - [x] Task 6: complete (commits 0b5b84e..7c5b64d, spec OK, quality approved after 1 perf fix)
 - [x] Task 7: complete (commit dc6342d, spec OK, quality approved, 1 Minor logged)
-- [~] Task 8: automated+doc portions done by controller; MANUAL 4x3 matrix awaits the human
+- [x] Task 8: complete. Manual verification passed by the user (live session tested, satisfied).
 
 ## Minor findings (for final review triage)
 - Task 7: the three new _saveOpenRouter* handlers omit the trailing this.requestUpdate() that every
@@ -68,8 +68,7 @@ RESOLVED by human (accept, no code change):
   DECISION: accepted as-is. It matches the existing Groq field's behavior, and pasting (the normal
   path) is unaffected. No code change. If the Groq field is ever debounced, do both together.
 
-BLOCKING MERGE:
-- Task 8 manual 4x3 matrix has not been run. Requires live audio + real API calls.
+BLOCKING MERGE: none. User tested live and confirmed satisfied.
 
 FOLLOW-UPS (separate branch, NOT this one):
 - localai.js:186-211 - same trailing-frame SSE bug fixed here, PLUS a bare JSON.parse with no
@@ -80,3 +79,23 @@ FOLLOW-UPS (separate branch, NOT this one):
 - storage.js - rate-limit counter model names don't match getAvailableModel(). Untouched here.
   This is the change sitting in the user's stash@{0}.
 - Release notes: Groq users will see fewer dropped tokens (the approved SSE deviation).
+
+## Post-review fixes (found during the user's live testing)
+
+- e7bdf00 fix: wait for transcription to settle before answering (800ms debounce).
+  ROOT CAUSE of the long-running "compound question" problem. Questions were truncated to their
+  first fragment ("Te", "If", "What"). Pre-existing on master; affected Groq identically.
+  Proven by replaying the real session log through the new logic: all 4 questions now complete.
+- eca2d91 fix: send max_tokens to openrouter and stop forcing unsupported reasoning param
+  1. max_completion_tokens is NOT in OpenRouter's per-model supported_parameters -> silently dropped
+     -> generation was UNCAPPED on prepaid credit. Now sends max_tokens via provider.maxTokensParam.
+     NOTE: the final reviewer flagged this and the controller incorrectly dismissed it based on
+     OpenRouter's general docs page. Per-model supported_parameters is the authority.
+  2. `reasoning` was sent unconditionally; many models don't support it. Now opt-in only.
+  3. emptyResponseMessage claimed a token limit when finish_reason was "stop" and reasoning_tokens 0.
+     Now reports the real finish_reason.
+  Groq reasoning options verified IDENTICAL across all model/flag combinations after the change.
+
+## User config note
+Their saved openrouterModel/openrouterImageModel was qwen/qwen3-235b-a22b-2507, which is text-only
+AND does not support `reasoning`. Advised to set both fields to qwen/qwen3.8-27b (vision + reasoning).
