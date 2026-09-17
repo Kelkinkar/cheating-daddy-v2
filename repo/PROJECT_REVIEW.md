@@ -36,7 +36,8 @@ src/
   audioUtils.js            PCM→WAV + debug audio dump (only used when DEBUG_AUDIO is set)
   utils/
     window.js              BrowserWindow creation, global shortcuts, window IPC
-    gemini.js              ~1.4k lines: the real hub. Gemini Live + Groq + provider routing
+    gemini.js              the real hub. Gemini Live + provider routing/orchestration
+    openaiCompatible.js    pure: provider descriptors, request builder, SSE reader (unit-tested)
     cloud.js               WebSocket client for wss://api.cheatingdaddy.com (UI disabled)
     localai.js             offline path: VAD → whisper.cpp server → llama.cpp server
     native-ai-runtime.js   downloads/verifies llama & whisper binaries + GGUF models
@@ -77,13 +78,18 @@ precedence is OpenRouter, then Groq, then Gemini Live itself if neither key is s
 
 1. Audio chunks (24 kHz mono PCM, 100 ms) → `sendRealtimeInput`.
 2. `serverContent.inputTranscription` accumulates into `currentTranscription`.
-3. On _any_ inputTranscription message, `sendFinalTranscriptionToGroq()` fires once per turn
-   (guard `groqRequestStartedForTurn`, reset on `turnComplete`).
-4. Groq streams back; tokens go to the renderer as `new-response` / `update-response`.
-5. If **no** Groq key, Gemini's own `outputTranscription` is used as the answer instead.
+3. On _any_ inputTranscription message, `sendFinalTranscriptionToAnswerProvider()` fires once per
+   turn (guard `groqRequestStartedForTurn`, reset on `turnComplete`).
+4. The resolved provider streams back via `sendTextToProvider`; tokens go to the renderer as
+   `new-response` / `update-response`.
+5. If **neither** provider key is set, `getAnswerProvider()` returns `null` and Gemini's own
+   `outputTranscription` is used as the answer instead.
 
-Screenshots take a different route: `sendImageToGroq` (vision model) if a Groq key exists, else
-`sendImageToGeminiHttp` with the rate-limit-chosen flash model.
+Screenshots take a different route: `sendImageToProvider` (vision model) if any provider key exists,
+else `sendImageToGeminiHttp` with the rate-limit-chosen flash model.
+
+A failed provider call surfaces to the status line and stops — it never cascades to another provider,
+so a dead key is visible rather than silently degrading answers mid-interview.
 
 ### Reconnection
 
