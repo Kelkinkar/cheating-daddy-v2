@@ -825,8 +825,9 @@ const PROVIDER_KEY_GETTERS = {
 // Resolves who answers this turn. Precedence is OpenRouter, then Groq, then null.
 // null means Gemini Live answers directly, which is the behavior when no provider key is set.
 function getAnswerProvider() {
-    if ((getOpenRouterApiKey() || '').trim() !== '') return PROVIDERS.openrouter;
-    if ((getGroqApiKey() || '').trim() !== '') return PROVIDERS.groq;
+    const credentials = getCredentials();
+    if ((credentials.openrouterApiKey || '').trim() !== '') return PROVIDERS.openrouter;
+    if ((credentials.groqApiKey || '').trim() !== '') return PROVIDERS.groq;
     return null;
 }
 ```
@@ -1101,7 +1102,7 @@ async function sendImageToProvider(provider, base64Data, prompt) {
 
 - [ ] **Step 8: Rewire the four remaining call sites**
 
-Line ~690, Gemini Live output transcription suppression:
+Line ~690, Gemini Live output transcription suppression. The cheap in-memory check goes FIRST so the disk-reading resolver short-circuits away on the many messages carrying no transcription:
 
 ```js
                     if (!getAnswerProvider() && message.serverContent?.outputTranscription?.text) {

@@ -24,11 +24,18 @@ Stash: stash@{0} = user's pre-existing WIP (model rename, README, lockfile)
 - [x] Task 3: complete (commits 11d8170..2cc2894, spec OK, quality approved after 1 fix)
 - [x] Task 4: complete (commit fe35329, spec OK, quality approved, no findings)
 - [x] Task 5: complete (commit 1344362, spec OK, quality approved, no findings)
-- [ ] Task 6: gemini.js provider resolution + unified send paths
+- [x] Task 6: complete (commits 0b5b84e..7c5b64d, spec OK, quality approved after 1 perf fix)
 - [ ] Task 7: Settings UI
 - [ ] Task 8: End-to-end verification
 
 ## Minor findings (for final review triage)
+- Task 6: currentSystemPrompt is now snapshotted BEFORE the request for usage accounting rather
+  than re-read after. More correct (bills the prompt actually sent); differs only if reassigned mid-stream.
+- Task 6: a bare `data: ` line with empty payload no longer emits a stream_parse_error. Log-only.
+- Task 6: Groq users will now see FEWER dropped tokens (SSE reassembly reaching production). This is
+  the approved deviation; note it in any release notes.
+- PLAN DEFECT (mine): planned getAnswerProvider() did 2 uncached disk reads per call and sat left of
+  && in the Gemini Live message hot path. Fixed in 7c5b64d.
 - Task 3: no try/finally around the SSE read loop. A throwing handler callback leaves the reader
   locked / stream undrained. Matches localai.js pattern. ACCEPTED OUT OF SCOPE - triage at final review.
 - PLAN DEFECT (mine): Task 3 code as planned dropped a final frame lacking a trailing newline.
