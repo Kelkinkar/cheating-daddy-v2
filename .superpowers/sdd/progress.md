@@ -51,3 +51,30 @@ Stash: stash@{0} = user's pre-existing WIP (model rename, README, lockfile)
 - PLAN DEFECT (mine): plan specified `node --test test/`, which Node 24 rejects. Corrected in plan.
 - PROCESS: implementer and fixer both filed reports claiming work that was incomplete
   (unstaged deletion, malformed commit trailer). Verify every report against the repo.
+
+## Final whole-branch review (verdict: ready with follow-ups)
+
+RESOLVED by controller, no code change needed:
+- `max_completion_tokens` on OpenRouter: reviewer flagged it as possibly-dropped (OpenRouter documents
+  `max_tokens`). Checked OpenRouter's live parameter docs: `max_completion_tokens` IS documented and
+  supported ("Key: max_completion_tokens, Optional, integer, 1 or above"). The 16384 cap applies.
+  Not a defect; does NOT need to go in the manual matrix.
+
+OPEN - needs human decision:
+- Partially-typed OpenRouter key kills all answers. MainView saves on every @input keystroke, and
+  precedence is key PRESENCE. Typing (not pasting) a key means `openrouterApiKey: "s"` after one
+  keystroke -> every turn 401s, Groq is bypassed, Gemini output suppressed. Paste is one event, so the
+  common path is safe. Same pattern as the existing Groq field.
+
+BLOCKING MERGE:
+- Task 8 manual 4x3 matrix has not been run. Requires live audio + real API calls.
+
+FOLLOW-UPS (separate branch, NOT this one):
+- localai.js:186-211 - same trailing-frame SSE bug fixed here, PLUS a bare JSON.parse with no
+  try/catch at line 202: one malformed frame kills the entire local stream. Worse than what was
+  fixed here. Zero diff on this branch.
+- localai.js + openaiCompatible.js - no try/finally around SSE read loops; window destroyed mid-stream
+  leaves the reader locked. Pre-existing pattern, present on master too.
+- storage.js - rate-limit counter model names don't match getAvailableModel(). Untouched here.
+  This is the change sitting in the user's stash@{0}.
+- Release notes: Groq users will see fewer dropped tokens (the approved SSE deviation).
