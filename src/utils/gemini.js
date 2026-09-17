@@ -11,6 +11,7 @@ const {
     getOpenRouterApiKey,
     incrementCharUsage,
     getConfig,
+    getCredentials,
 } = require('../storage');
 const { PROVIDERS, buildChatRequest, streamChatCompletion, stripThinkingTags } = require('./openaiCompatible');
 const { connectCloud, sendCloudAudio, sendCloudText, sendCloudImage, closeCloud, isCloudActive, setOnTurnComplete } = require('./cloud');
@@ -225,9 +226,12 @@ const PROVIDER_KEY_GETTERS = {
 
 // Resolves who answers this turn. Precedence is OpenRouter, then Groq, then null.
 // null means Gemini Live answers directly, which is the behavior when no provider key is set.
+// Reads credentials once per call: getCredentials() hits disk uncached and this runs in the
+// Gemini Live message hot path.
 function getAnswerProvider() {
-    if ((getOpenRouterApiKey() || '').trim() !== '') return PROVIDERS.openrouter;
-    if ((getGroqApiKey() || '').trim() !== '') return PROVIDERS.groq;
+    const credentials = getCredentials();
+    if ((credentials.openrouterApiKey || '').trim() !== '') return PROVIDERS.openrouter;
+    if ((credentials.groqApiKey || '').trim() !== '') return PROVIDERS.groq;
     return null;
 }
 
@@ -612,7 +616,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                         sendFinalTranscriptionToAnswerProvider();
                     }
 
-                    if (!getAnswerProvider() && message.serverContent?.outputTranscription?.text) {
+                    if (message.serverContent?.outputTranscription?.text && !getAnswerProvider()) {
                         const isFirstChunk = messageBuffer === '';
                         messageBuffer += message.serverContent.outputTranscription.text;
                         sendToRenderer(isFirstChunk ? 'new-response' : 'update-response', messageBuffer);
@@ -620,7 +624,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
 
                     if (message.serverContent?.generationComplete) {
                         if (currentTranscription.trim() !== '') {
-                            if (!getAnswerProvider() && messageBuffer.trim() !== '') {
+                            if (messageBuffer.trim() !== '' && !getAnswerProvider()) {
                                 saveConversationTurn(currentTranscription, messageBuffer);
                             }
                             currentTranscription = '';
