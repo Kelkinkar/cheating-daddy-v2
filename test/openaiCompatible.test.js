@@ -206,3 +206,10 @@ test('streamChatCompletion withholds onText while only thinking content has arri
     assert.deepEqual(seen, ['Answer']);
     assert.equal(result.fullText, '<think>hmm</think>Answer');
 });
+
+test('streamChatCompletion processes a final frame with no trailing newline', async () => {
+    const frame = deltaFrame('last token').replace(/\n$/, '');
+    const result = await streamChatCompletion(responseFrom([frame]), {});
+
+    assert.equal(result.fullText, 'last token');
+});

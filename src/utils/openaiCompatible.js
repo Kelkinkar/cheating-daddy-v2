@@ -106,6 +106,31 @@ async function streamChatCompletion(response, handlers = {}) {
     let fullText = '';
     let finishReason = null;
 
+    const processLine = line => {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data: ')) return;
+
+        const data = trimmed.slice(6);
+        if (data === '[DONE]') return;
+
+        try {
+            const event = JSON.parse(data);
+            onEvent?.(event);
+            finishReason = event.choices?.[0]?.finish_reason || finishReason;
+
+            const token = event.choices?.[0]?.delta?.content || '';
+            if (!token) return;
+
+            fullText += token;
+            const displayText = stripThinkingTags(fullText);
+            if (displayText) {
+                onText?.(displayText);
+            }
+        } catch (error) {
+            onParseError?.(data, error);
+        }
+    };
+
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -120,29 +145,13 @@ async function streamChatCompletion(response, handlers = {}) {
         pendingLine = lines.pop() || '';
 
         for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith('data: ')) continue;
-
-            const data = trimmed.slice(6);
-            if (data === '[DONE]') continue;
-
-            try {
-                const event = JSON.parse(data);
-                onEvent?.(event);
-                finishReason = event.choices?.[0]?.finish_reason || finishReason;
-
-                const token = event.choices?.[0]?.delta?.content || '';
-                if (!token) continue;
-
-                fullText += token;
-                const displayText = stripThinkingTags(fullText);
-                if (displayText) {
-                    onText?.(displayText);
-                }
-            } catch (error) {
-                onParseError?.(data, error);
-            }
+            processLine(line);
         }
+    }
+
+    // A stream that closes without a trailing newline leaves a complete frame buffered.
+    if (pendingLine) {
+        processLine(pendingLine);
     }
 
     return { fullText, finishReason };
