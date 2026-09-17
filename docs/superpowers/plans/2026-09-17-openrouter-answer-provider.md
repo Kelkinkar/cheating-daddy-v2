@@ -19,7 +19,7 @@
 - **Default model for both new config keys:** `qwen/qwen3.8-27b` (verified on OpenRouter as `input_modalities: ['text','image','video']`).
 - **No error cascade.** A failed OpenRouter call surfaces to the status line and stops. It must never silently retry against Groq or Gemini.
 - **Formatting:** run `npx prettier --write <changed files>` before every commit. Prettier config is 4-space indent, print width 150, single quotes, semicolons.
-- **Behavior for existing users must not change.** With no OpenRouter key set, every code path must behave exactly as it does at `master` @ `3cccc36`.
+- **Behavior for existing users must not change,** with exactly one documented exception. With no OpenRouter key set, every code path must behave as it does at `master` @ `3cccc36`, **except** the SSE partial-frame buffering fix specified in Task 3. That fix makes the Groq path strictly more reliable — today's inline loops drop a JSON frame that splits across two network reads — and was explicitly approved as an intentional deviation. No other behavioral change to the Groq or Gemini paths is permitted.
 
 ---
 
