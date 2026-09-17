@@ -701,6 +701,9 @@ export class MainView extends LitElement {
         _geminiLiveModel: { state: true },
         _groqModel: { state: true },
         _groqImageModel: { state: true },
+        _openrouterKey: { state: true },
+        _openrouterModel: { state: true },
+        _openrouterImageModel: { state: true },
         _disableGroqThinking: { state: true },
         _tokenError: { state: true },
         _keyError: { state: true },
@@ -730,6 +733,9 @@ export class MainView extends LitElement {
         this._geminiLiveModel = 'gemini-3.1-flash-live-preview';
         this._groqModel = 'qwen/qwen3.6-27b';
         this._groqImageModel = 'qwen/qwen3.6-27b';
+        this._openrouterKey = '';
+        this._openrouterModel = 'qwen/qwen3.8-27b';
+        this._openrouterImageModel = 'qwen/qwen3.8-27b';
         this._disableGroqThinking = true;
         this._tokenError = false;
         this._keyError = false;
@@ -770,6 +776,9 @@ export class MainView extends LitElement {
             this._geminiLiveModel = config.geminiLiveModel || 'gemini-3.1-flash-live-preview';
             this._groqModel = config.groqModel || 'qwen/qwen3.6-27b';
             this._groqImageModel = config.groqImageModel || 'qwen/qwen3.6-27b';
+            this._openrouterKey = (await cheatingDaddy.storage.getOpenRouterApiKey().catch(() => '')) || '';
+            this._openrouterModel = config.openrouterModel || 'qwen/qwen3.8-27b';
+            this._openrouterImageModel = config.openrouterImageModel || 'qwen/qwen3.8-27b';
             this._disableGroqThinking = config.disableGroqThinking === true;
 
             // Load local AI settings
@@ -961,6 +970,21 @@ export class MainView extends LitElement {
         this._groqImageModel = val;
         await cheatingDaddy.storage.updateConfig('groqImageModel', val);
         this.requestUpdate();
+    }
+
+    async _saveOpenRouterKey(val) {
+        this._openrouterKey = val;
+        await cheatingDaddy.storage.setOpenRouterApiKey(val);
+    }
+
+    async _saveOpenRouterModel(val) {
+        this._openrouterModel = val;
+        await cheatingDaddy.storage.updateConfig('openrouterModel', val);
+    }
+
+    async _saveOpenRouterImageModel(val) {
+        this._openrouterImageModel = val;
+        await cheatingDaddy.storage.updateConfig('openrouterImageModel', val);
     }
 
     async _saveDisableGroqThinking(disabled) {
@@ -1192,7 +1216,7 @@ export class MainView extends LitElement {
                 <summary class="config-summary">
                     <span class="config-summary-text">
                         <span class="config-summary-title">AI responses</span>
-                        <span class="config-summary-description">Groq key and response model</span>
+                        <span class="config-summary-description">Answer provider keys and models</span>
                     </span>
                     ${this._renderConfigChevron()}
                 </summary>
@@ -1215,6 +1239,29 @@ export class MainView extends LitElement {
                         <input type="text" .value=${this._groqImageModel} @input=${e => this._saveGroqImageModel(e.target.value)} />
                     </div>
 
+                    <div class="form-group">
+                        <label class="form-label">OpenRouter API Key</label>
+                        <input
+                            type="password"
+                            placeholder="Optional"
+                            .value=${this._openrouterKey}
+                            @input=${e => this._saveOpenRouterKey(e.target.value)}
+                        />
+                        <div class="form-hint">
+                            <span class="link" @click=${() => this.onExternalLink('https://openrouter.ai/keys')}>Get OpenRouter key</span>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">OpenRouter Model</label>
+                        <input type="text" .value=${this._openrouterModel} @input=${e => this._saveOpenRouterModel(e.target.value)} />
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">OpenRouter Image Model</label>
+                        <input type="text" .value=${this._openrouterImageModel} @input=${e => this._saveOpenRouterImageModel(e.target.value)} />
+                    </div>
+
                     <label class="config-checkbox">
                         <input
                             type="checkbox"
@@ -1228,7 +1275,8 @@ export class MainView extends LitElement {
                     </label>
 
                     <div class="config-note">
-                        If the Groq API key is empty, Gemini Live is used for answers instead. Its answer quality may be lower.
+                        If an OpenRouter key is set it is used for answers. Otherwise Groq is used, and if neither is set, Gemini Live answers
+                        directly — its answer quality may be lower.
                     </div>
                 </div>
             </details>
