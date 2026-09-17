@@ -6,6 +6,13 @@ Branch: feat/openrouter-provider (from master @ 3cccc36 + 3 docs commits)
 Stash: stash@{0} = user's pre-existing WIP (model rename, README, lockfile)
 
 ## Human rulings
+- SECRETS: never print credential values in verification. getConfig()/getCredentials() read the
+  USER'S REAL ~/.config/cheating-daddy-config/, not code defaults. A Task 4 check printed the live
+  openrouterApiKey into the transcript. Not in git (verified every commit + .superpowers/sdd/.gitignore
+  is `*`). User advised to rotate. Check presence/length only, never the value.
+- USER'S SAVED CONFIG OVERRIDES DEFAULTS: their openrouterModel is already qwen/qwen3-235b-a22b-2507
+  and groqModel is qwen/qwen3.8-27b. The qwen/qwen3.8-27b default only affects fresh installs.
+  Task 8 manual verification will exercise THEIR models, not the shipped defaults.
 - Working tree: stashed, branch from clean master.
 - Task 3 SSE fix: KEEP the partial-frame buffering fix; Global Constraint amended to allow it.
 - sendToGemma dead code: DO NOT touch. Not a defect for review purposes — plan-mandated.
@@ -15,7 +22,7 @@ Stash: stash@{0} = user's pre-existing WIP (model rename, README, lockfile)
 - [x] Task 1: complete (commits 4d44d79..578d187, spec OK, quality approved)
 - [x] Task 2: complete (commit 9312b2d, spec OK, quality approved)
 - [x] Task 3: complete (commits 11d8170..2cc2894, spec OK, quality approved after 1 fix)
-- [ ] Task 4: Storage layer
+- [x] Task 4: complete (commit fe35329, spec OK, quality approved, no findings)
 - [ ] Task 5: IPC + renderer wrapper
 - [ ] Task 6: gemini.js provider resolution + unified send paths
 - [ ] Task 7: Settings UI
