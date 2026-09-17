@@ -97,10 +97,62 @@ function buildChatRequest({ provider, apiKey, model, messages, thinkingDisabled 
     };
 }
 
+async function streamChatCompletion(response, handlers = {}) {
+    const { onText, onChunk, onEvent, onParseError } = handlers;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    let pendingLine = '';
+    let fullText = '';
+    let finishReason = null;
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        onChunk?.(chunk);
+
+        // Carry an incomplete trailing line into the next chunk so frames split
+        // across network reads are not dropped.
+        pendingLine += chunk;
+        const lines = pendingLine.split('\n');
+        pendingLine = lines.pop() || '';
+
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data: ')) continue;
+
+            const data = trimmed.slice(6);
+            if (data === '[DONE]') continue;
+
+            try {
+                const event = JSON.parse(data);
+                onEvent?.(event);
+                finishReason = event.choices?.[0]?.finish_reason || finishReason;
+
+                const token = event.choices?.[0]?.delta?.content || '';
+                if (!token) continue;
+
+                fullText += token;
+                const displayText = stripThinkingTags(fullText);
+                if (displayText) {
+                    onText?.(displayText);
+                }
+            } catch (error) {
+                onParseError?.(data, error);
+            }
+        }
+    }
+
+    return { fullText, finishReason };
+}
+
 module.exports = {
     PROVIDERS,
     buildChatRequest,
     stripThinkingTags,
     getGroqReasoningOptions,
     getOpenRouterReasoningOptions,
+    streamChatCompletion,
 };

@@ -135,3 +135,74 @@ test('buildChatRequest merges per-provider reasoning options into the body', () 
     const body = JSON.parse(options.body);
     assert.deepEqual(body.reasoning, { exclude: true, effort: 'none' });
 });
+
+const { streamChatCompletion } = require('../src/utils/openaiCompatible');
+
+function responseFrom(chunks) {
+    const encoder = new TextEncoder();
+    return {
+        body: new ReadableStream({
+            start(controller) {
+                for (const chunk of chunks) {
+                    controller.enqueue(encoder.encode(chunk));
+                }
+                controller.close();
+            },
+        }),
+    };
+}
+
+function deltaFrame(content, finishReason = null) {
+    return `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: finishReason }] })}\n`;
+}
+
+test('streamChatCompletion accumulates tokens and reports the final text', async () => {
+    const seen = [];
+    const result = await streamChatCompletion(responseFrom([deltaFrame('Hello'), deltaFrame(' world')]), {
+        onText: text => seen.push(text),
+    });
+
+    assert.equal(result.fullText, 'Hello world');
+    assert.deepEqual(seen, ['Hello', 'Hello world']);
+});
+
+test('streamChatCompletion reassembles a frame split across chunks', async () => {
+    const frame = deltaFrame('Hello world');
+    const midpoint = Math.floor(frame.length / 2);
+    const result = await streamChatCompletion(responseFrom([frame.slice(0, midpoint), frame.slice(midpoint)]), {});
+
+    assert.equal(result.fullText, 'Hello world');
+});
+
+test('streamChatCompletion ignores the DONE sentinel', async () => {
+    const result = await streamChatCompletion(responseFrom([deltaFrame('done'), 'data: [DONE]\n']), {});
+
+    assert.equal(result.fullText, 'done');
+});
+
+test('streamChatCompletion survives a malformed frame and reports it', async () => {
+    const errors = [];
+    const result = await streamChatCompletion(responseFrom(['data: {not json}\n', deltaFrame('ok')]), {
+        onParseError: (data, error) => errors.push({ data, message: error.message }),
+    });
+
+    assert.equal(result.fullText, 'ok');
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].data, '{not json}');
+});
+
+test('streamChatCompletion captures the finish reason', async () => {
+    const result = await streamChatCompletion(responseFrom([deltaFrame('hi', 'length')]), {});
+
+    assert.equal(result.finishReason, 'length');
+});
+
+test('streamChatCompletion withholds onText while only thinking content has arrived', async () => {
+    const seen = [];
+    const result = await streamChatCompletion(responseFrom([deltaFrame('<think>hmm'), deltaFrame('</think>Answer')]), {
+        onText: text => seen.push(text),
+    });
+
+    assert.deepEqual(seen, ['Answer']);
+    assert.equal(result.fullText, '<think>hmm</think>Answer');
+});
