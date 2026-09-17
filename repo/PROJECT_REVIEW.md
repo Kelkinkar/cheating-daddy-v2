@@ -10,15 +10,15 @@ interview/meeting teleprompter.
 
 ## 1. Stack and shape
 
-| | |
-|---|---|
-| Runtime | Electron 30, plain JavaScript (no TS, no build step, no bundler) |
-| UI | Lit 2.7 web components, loaded from vendored `src/assets/lit-*.min.js` |
-| Packaging | Electron Forge 7 (squirrel / dmg / AppImage), `forge.config.js` |
-| Deps (runtime) | `@google/genai`, `ws`, `electron-squirrel-startup` — that's all |
-| Tests | none |
-| Lint | none (`npm run lint` echoes "No linting configured") |
-| Format | Prettier: 4 spaces, width 150, single quotes (`.prettierrc`) |
+|                |                                                                        |
+| -------------- | ---------------------------------------------------------------------- |
+| Runtime        | Electron 30, plain JavaScript (no TS, no build step, no bundler)       |
+| UI             | Lit 2.7 web components, loaded from vendored `src/assets/lit-*.min.js` |
+| Packaging      | Electron Forge 7 (squirrel / dmg / AppImage), `forge.config.js`        |
+| Deps (runtime) | `@google/genai`, `ws`, `electron-squirrel-startup` — that's all        |
+| Tests          | none                                                                   |
+| Lint           | none (`npm run lint` echoes "No linting configured")                   |
+| Format         | Prettier: 4 spaces, width 150, single quotes (`.prettierrc`)           |
 
 `src/index.js` is the main process; there is **no functioning preload** — `src/preload.js` is a
 comment-only stub and is never referenced. The renderer runs with `nodeIntegration: true` and
@@ -36,7 +36,8 @@ src/
   audioUtils.js            PCM→WAV + debug audio dump (only used when DEBUG_AUDIO is set)
   utils/
     window.js              BrowserWindow creation, global shortcuts, window IPC
-    gemini.js              ~1.4k lines: the real hub. Gemini Live + Groq + provider routing
+    gemini.js              the real hub. Gemini Live + provider routing/orchestration
+    openaiCompatible.js    pure: provider descriptors, request builder, SSE reader (unit-tested)
     cloud.js               WebSocket client for wss://api.cheatingdaddy.com (UI disabled)
     localai.js             offline path: VAD → whisper.cpp server → llama.cpp server
     native-ai-runtime.js   downloads/verifies llama & whisper binaries + GGUF models
@@ -54,6 +55,7 @@ src/
 ## 2. Runtime architecture
 
 ### Provider modes
+
 `gemini.js` holds a module-level `currentProviderMode` of `'byok' | 'cloud' | 'local'`. Every
 audio/text/image IPC handler branches on it.
 
@@ -68,24 +70,35 @@ audio/text/image IPC handler branches on it.
 - **local**: fully offline. See §3.
 
 ### Answer path in byok mode (the important bit)
-Gemini Live is used as the **ear**; Groq is used as the **mouth** whenever a Groq key is configured:
+
+Gemini Live is used as the **ear**; an OpenAI-compatible provider is used as the **mouth**. Provider
+precedence is OpenRouter, then Groq, then Gemini Live itself if neither key is set — resolved by
+`getAnswerProvider()` in `gemini.js`, with the shared request/stream logic in
+`src/utils/openaiCompatible.js`:
 
 1. Audio chunks (24 kHz mono PCM, 100 ms) → `sendRealtimeInput`.
 2. `serverContent.inputTranscription` accumulates into `currentTranscription`.
-3. On *any* inputTranscription message, `sendFinalTranscriptionToGroq()` fires once per turn
-   (guard `groqRequestStartedForTurn`, reset on `turnComplete`).
-4. Groq streams back; tokens go to the renderer as `new-response` / `update-response`.
-5. If **no** Groq key, Gemini's own `outputTranscription` is used as the answer instead.
+3. On _any_ inputTranscription message, `sendFinalTranscriptionToAnswerProvider()` fires once per
+   turn (guard `groqRequestStartedForTurn`, reset on `turnComplete`).
+4. The resolved provider streams back via `sendTextToProvider`; tokens go to the renderer as
+   `new-response` / `update-response`.
+5. If **neither** provider key is set, `getAnswerProvider()` returns `null` and Gemini's own
+   `outputTranscription` is used as the answer instead.
 
-Screenshots take a different route: `sendImageToGroq` (vision model) if a Groq key exists, else
-`sendImageToGeminiHttp` with the rate-limit-chosen flash model.
+Screenshots take a different route: `sendImageToProvider` (vision model) if any provider key exists,
+else `sendImageToGeminiHttp` with the rate-limit-chosen flash model.
+
+A failed provider call surfaces to the status line and stops — it never cascades to another provider,
+so a dead key is visible rather than silently degrading answers mid-interview.
 
 ### Reconnection
+
 `onclose` → `attemptReconnect()`, max 3 tries, 2 s apart, recursive. On success it replays the last
 20 turns as a synthetic text message (`buildContextMessage`). On exhaustion it emits `reconnect-failed`,
 which the renderer renders as a response card.
 
 ### Renderer ↔ main
+
 Main→renderer channels: `update-status`, `new-response`, `update-response`, `session-initializing`,
 `reconnect-failed`, `save-conversation-turn`, `save-session-context`, `save-screen-analysis`,
 `clear-sensitive-data`, `click-through-toggled`, `whisper-downloading`, `local-ai-download-progress`,
@@ -100,6 +113,7 @@ Renderer→main: `initialize-{gemini,cloud,local}`, `cancel-local-initialization
 main process reach the UI by `webContents.executeJavaScript('cheatingDaddy.handleShortcut(...)')`.
 
 ### Audio capture, per platform
+
 - **macOS**: spawns the bundled `src/assets/SystemAudioDump` binary (stereo 24 kHz → mono in
   `convertStereoToMono`, which just takes the left channel). Mic optional via `getUserMedia`.
 - **Windows**: `getDisplayMedia` with `audio: 'loopback'` (set in the display-media request handler).
@@ -107,6 +121,7 @@ main process reach the UI by `webContents.executeJavaScript('cheatingDaddy.handl
   `getUserMedia`. The README's "Linux (kinda, dont use)" still holds.
 
 ### Stealth features
+
 `setContentProtection(true)` (excluded from screen capture), `setSkipTaskbar` on Windows,
 `setHiddenInMissionControl` on macOS, `setVisibleOnAllWorkspaces`, click-through toggle, and
 `emergencyErase` (Ctrl/Cmd+Shift+E) which hides, closes the session, fires `clear-sensitive-data`
@@ -172,14 +187,15 @@ Plain JSON under the OS config dir (`~/.config/cheating-daddy-config` on Linux):
    `src/utils/window.js:318`, so `updateGlobalShortcuts` runs twice per change.
 5. **Unused import** `isCloudActive` in `gemini.js:7`; `getModelForToday` in `storage.js` is exported but
    called nowhere; `pcmToWav`/`analyzeAudioBuffer` only run under `DEBUG_AUDIO`.
-6. `attemptReconnect` recurses on failure *and* is re-entered from `onclose`; the counter caps it, but
+6. `attemptReconnect` recurses on failure _and_ is re-entered from `onclose`; the counter caps it, but
    the control flow is hard to follow and `reconnectAttempts` is never reset on a successful reconnect
    (comment acknowledges this).
 
 ### Behavioural risks
 
-7. **Groq fires on the first transcription fragment, not the final one.** `sendFinalTranscriptionToGroq`
-   is called from *every* `inputTranscription` message and latches `groqRequestStartedForTurn = true`.
+7. **The answer provider fires on the first transcription fragment, not the final one.**
+   `sendFinalTranscriptionToAnswerProvider` is called from _every_ `inputTranscription` message and
+   latches `groqRequestStartedForTurn = true`. Still unfixed; OpenRouter inherits it identically.
    Gemini Live's input transcription arrives heavily fragmented, so the answer is frequently generated
    from a partial question, and later fragments of the same utterance are dropped until `turnComplete`.
    This is the root of the "compound question" class of bugs. A debounce on transcription settling, or
@@ -211,7 +227,7 @@ Plain JSON under the OS config dir (`~/.config/cheating-daddy-config` on Linux):
 ## 6. Divergence from AGENTS.md
 
 `AGENTS.md` describes an aspirational target (TypeScript strict, React 19, shadcn/ui, Jest, secure IPC).
-None of it exists yet — the codebase is JS + Lit + no tests. Two of its TODO items *have* effectively
+None of it exists yet — the codebase is JS + Lit + no tests. Two of its TODO items _have_ effectively
 landed, though under a different design than described: local whisper.cpp transcription and VAD are
 implemented natively in `localai.js`. Dual-stream capture is partial (mic and system audio are captured
 on separate channels but merged into one Gemini stream). Speaker diarization is done server-side by
@@ -231,12 +247,12 @@ M src/storage.js     model-name rename that breaks limit counting — see findin
 
 ## 8. Where to start for common tasks
 
-| Task | File |
-|---|---|
-| Change how answers are generated / routed | `src/utils/gemini.js` |
-| Change what the AI is told to do | `src/utils/prompts.js` |
-| Change capture, screenshots, or the renderer façade | `src/utils/renderer.js` |
-| Add a settings field | `src/storage.js` defaults → `src/index.js` IPC → `MainView`/`CustomizeView` |
-| Window behaviour, shortcuts, stealth | `src/utils/window.js` |
-| Offline pipeline | `src/utils/localai.js`, `src/utils/native-ai-runtime.js` |
-| Debug a live session | `<config>/logs/<sessionId>.json` via `transportLogger.js` |
+| Task                                                | File                                                                        |
+| --------------------------------------------------- | --------------------------------------------------------------------------- |
+| Change how answers are generated / routed           | `src/utils/gemini.js`                                                       |
+| Change what the AI is told to do                    | `src/utils/prompts.js`                                                      |
+| Change capture, screenshots, or the renderer façade | `src/utils/renderer.js`                                                     |
+| Add a settings field                                | `src/storage.js` defaults → `src/index.js` IPC → `MainView`/`CustomizeView` |
+| Window behaviour, shortcuts, stealth                | `src/utils/window.js`                                                       |
+| Offline pipeline                                    | `src/utils/localai.js`, `src/utils/native-ai-runtime.js`                    |
+| Debug a live session                                | `<config>/logs/<sessionId>.json` via `transportLogger.js`                   |

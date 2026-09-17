@@ -12,12 +12,17 @@ const DEFAULT_CONFIG = {
     geminiLiveModel: 'gemini-3.1-flash-live-preview',
     groqModel: 'qwen/qwen3.6-27b',
     groqImageModel: 'qwen/qwen3.6-27b',
+    openrouterModel: 'qwen/qwen3.8-27b',
+    openrouterImageModel: 'qwen/qwen3.8-27b',
+    // Despite the name, this governs every answer provider (Groq and OpenRouter alike).
+    // Kept unrenamed so the stored config schema stays backwards compatible.
     disableGroqThinking: true,
 };
 
 const DEFAULT_CREDENTIALS = {
     apiKey: '',
     groqApiKey: '',
+    openrouterApiKey: '',
 };
 
 const DEFAULT_PREFERENCES = {
@@ -207,6 +212,14 @@ function getGroqApiKey() {
 
 function setGroqApiKey(groqApiKey) {
     return setCredentials({ groqApiKey });
+}
+
+function getOpenRouterApiKey() {
+    return getCredentials().openrouterApiKey || '';
+}
+
+function setOpenRouterApiKey(openrouterApiKey) {
+    return setCredentials({ openrouterApiKey });
 }
 
 // ============ PREFERENCES ============
@@ -513,6 +526,8 @@ module.exports = {
     setApiKey,
     getGroqApiKey,
     setGroqApiKey,
+    getOpenRouterApiKey,
+    setOpenRouterApiKey,
 
     // Preferences
     getPreferences,

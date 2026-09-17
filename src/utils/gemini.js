@@ -3,7 +3,17 @@ const { BrowserWindow, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const { saveDebugAudio } = require('../audioUtils');
 const { getSystemPrompt } = require('./prompts');
-const { getAvailableModel, incrementLimitCount, getApiKey, getGroqApiKey, incrementCharUsage, getConfig } = require('../storage');
+const {
+    getAvailableModel,
+    incrementLimitCount,
+    getApiKey,
+    getGroqApiKey,
+    getOpenRouterApiKey,
+    incrementCharUsage,
+    getConfig,
+    getCredentials,
+} = require('../storage');
+const { PROVIDERS, buildChatRequest, streamChatCompletion, stripThinkingTags } = require('./openaiCompatible');
 const { connectCloud, sendCloudAudio, sendCloudText, sendCloudImage, closeCloud, isCloudActive, setOnTurnComplete } = require('./cloud');
 const { startTransportLog, logTransportEvent, closeTransportLog } = require('./transportLogger');
 
@@ -17,7 +27,9 @@ function getLocalAi() {
 // Provider mode: 'byok', 'cloud', or 'local'
 let currentProviderMode = 'byok';
 
-// Groq conversation history for context
+// Conversation history for the OpenAI-compatible answer provider (Groq or OpenRouter),
+// keyed on the name `groqConversationHistory` for historical reasons; also shared with an
+// unreachable legacy code path further down. Do not rename.
 let groqConversationHistory = [];
 
 // Conversation tracking variables
@@ -48,9 +60,19 @@ let systemAudioProc = null;
 let messageBuffer = '';
 let groqRequestStartedForTurn = false;
 
-const GROQ_MAX_COMPLETION_TOKENS = 16384;
-const GROQ_EMPTY_RESPONSE_MESSAGE =
-    'Groq reached the maximum completion-token limit before returning a final answer. Disable thinking in Home → AI responses and try again.';
+// Gemini Live streams input transcription in fragments ~120ms apart. Answering on the first
+// fragment sends a 2-4 character question ("What"), so wait for the stream to settle. Measured:
+// max inter-fragment gap 244ms, full question 0.67s, so 800ms leaves ~3x margin.
+const TRANSCRIPTION_SETTLE_MS = 800;
+let transcriptionSettleTimer = null;
+
+function emptyResponseMessage(provider, finishReason) {
+    if (finishReason === 'length') {
+        return `${provider.label} hit the token limit before returning a final answer. Disable thinking in Home → AI responses and try again.`;
+    }
+
+    return `${provider.label} returned an empty response (finish reason: ${finishReason || 'unknown'}). The model may not support a parameter being sent, or may not suit this prompt. Try a different model in Home → AI responses.`;
+}
 
 // Reconnection variables
 let isUserClosing = false;
@@ -84,6 +106,7 @@ function initializeNewSession(profile = null, customPrompt = null) {
     startTransportLog(currentSessionId);
     currentTranscription = '';
     groqRequestStartedForTurn = false;
+    clearTranscriptionSettleTimer();
     conversationHistory = [];
     screenAnalysisHistory = [];
     groqConversationHistory = [];
@@ -205,14 +228,42 @@ async function getStoredSetting(key, defaultValue) {
     return defaultValue;
 }
 
-// helper to check if groq has been configured
-function hasGroqKey() {
-    const key = getGroqApiKey();
-    return key && key.trim() != '';
+// Maps a provider id to the credential accessor for its key. Lives here rather than on the
+// descriptor so openaiCompatible.js stays free of storage imports.
+const PROVIDER_KEY_GETTERS = {
+    groq: getGroqApiKey,
+    openrouter: getOpenRouterApiKey,
+};
+
+// Resolves who answers this turn. Precedence is OpenRouter, then Groq, then null.
+// null means Gemini Live answers directly, which is the behavior when no provider key is set.
+// Reads credentials once per call: getCredentials() hits disk uncached and this runs in the
+// Gemini Live message hot path.
+function getAnswerProvider() {
+    const credentials = getCredentials();
+    if ((credentials.openrouterApiKey || '').trim() !== '') return PROVIDERS.openrouter;
+    if ((credentials.groqApiKey || '').trim() !== '') return PROVIDERS.groq;
+    return null;
 }
 
-function sendFinalTranscriptionToGroq() {
-    if (!hasGroqKey() || groqRequestStartedForTurn) {
+function clearTranscriptionSettleTimer() {
+    if (transcriptionSettleTimer) {
+        clearTimeout(transcriptionSettleTimer);
+        transcriptionSettleTimer = null;
+    }
+}
+
+function scheduleAnswerForSettledTranscription() {
+    clearTranscriptionSettleTimer();
+    transcriptionSettleTimer = setTimeout(() => {
+        transcriptionSettleTimer = null;
+        sendFinalTranscriptionToAnswerProvider();
+    }, TRANSCRIPTION_SETTLE_MS);
+}
+
+function sendFinalTranscriptionToAnswerProvider() {
+    const provider = getAnswerProvider();
+    if (!provider || groqRequestStartedForTurn) {
         return;
     }
 
@@ -222,7 +273,7 @@ function sendFinalTranscriptionToGroq() {
     }
 
     groqRequestStartedForTurn = true;
-    sendToGroq(transcription);
+    sendTextToProvider(provider, transcription);
 }
 
 function trimConversationHistoryForGemma(history, maxChars = 42000) {
@@ -241,54 +292,23 @@ function trimConversationHistoryForGemma(history, maxChars = 42000) {
     return trimmed;
 }
 
-function stripThinkingTags(text) {
-    const trimmedStart = text.trimStart();
-    if ('<think>'.startsWith(trimmedStart)) {
-        return '';
-    }
-
-    return text.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').trim();
-}
-
-function getGroqReasoningOptions(model, disableThinking) {
-    if (model.includes('qwen3')) {
-        const options = {
-            reasoning_format: 'hidden',
-        };
-
-        if (disableThinking) {
-            options.reasoning_effort = 'none';
-        }
-
-        return options;
-    }
-
-    if (model.startsWith('openai/gpt-oss-')) {
-        return {
-            include_reasoning: false,
-        };
-    }
-
-    return {};
-}
-
-async function sendToGroq(transcription) {
-    const groqApiKey = getGroqApiKey();
-    if (!groqApiKey) {
-        console.log('No Groq API key configured, skipping Groq response');
+async function sendTextToProvider(provider, transcription) {
+    const apiKey = PROVIDER_KEY_GETTERS[provider.id]();
+    if (!apiKey) {
+        console.log(`No ${provider.label} API key configured, skipping response`);
         return;
     }
 
     if (!transcription || transcription.trim() === '') {
-        console.log('Empty transcription, skipping Groq');
+        console.log(`Empty transcription, skipping ${provider.label}`);
         return;
     }
 
     const config = getConfig();
-    const modelToUse = config.groqModel;
+    const modelToUse = config[provider.textModelKey];
 
-    console.log(`Sending to Groq (${modelToUse}):`, transcription.substring(0, 100) + '...');
-    logTransportEvent('groq.text.request', {
+    console.log(`Sending to ${provider.label} (${modelToUse}):`, transcription.substring(0, 100) + '...');
+    logTransportEvent(`${provider.id}.text.request`, {
         model: modelToUse,
         transcription,
     });
@@ -302,89 +322,57 @@ async function sendToGroq(transcription) {
         groqConversationHistory = groqConversationHistory.slice(-20);
     }
 
+    const systemPrompt = currentSystemPrompt || 'You are a helpful assistant.';
+
     try {
-        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${groqApiKey}`,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                model: modelToUse,
-                messages: [{ role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' }, ...groqConversationHistory],
-                stream: true,
-                temperature: 0.7,
-                max_completion_tokens: GROQ_MAX_COMPLETION_TOKENS,
-                ...getGroqReasoningOptions(modelToUse, config.disableGroqThinking),
-            }),
+        const { url, options } = buildChatRequest({
+            provider,
+            apiKey,
+            model: modelToUse,
+            messages: [{ role: 'system', content: systemPrompt }, ...groqConversationHistory],
+            thinkingDisabled: config.disableGroqThinking,
         });
+
+        const response = await fetch(url, options);
 
         if (!response.ok) {
             const errorText = await response.text();
-            console.error('Groq API error:', response.status, errorText);
-            logTransportEvent('groq.text.http_error', {
+            console.error(`${provider.label} API error:`, response.status, errorText);
+            logTransportEvent(`${provider.id}.text.http_error`, {
                 status: response.status,
                 body: errorText,
             });
-            sendToRenderer('update-status', `Groq error: ${response.status}`);
+            sendToRenderer('update-status', `${provider.label} error: ${response.status}`);
             return;
         }
 
-        logTransportEvent('groq.text.http_response', {
+        logTransportEvent(`${provider.id}.text.http_response`, {
             status: response.status,
         });
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let fullText = '';
         let isFirst = true;
-        let finishReason = null;
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value, { stream: true });
-            logTransportEvent('groq.text.stream_chunk', { chunk });
-            const lines = chunk.split('\n').filter(line => line.trim() !== '');
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.slice(6);
-                    if (data === '[DONE]') continue;
-
-                    try {
-                        const json = JSON.parse(data);
-                        logTransportEvent('groq.text.stream_event', json);
-                        finishReason = json.choices?.[0]?.finish_reason || finishReason;
-                        const token = json.choices?.[0]?.delta?.content || '';
-                        if (token) {
-                            fullText += token;
-                            const displayText = stripThinkingTags(fullText);
-                            if (displayText) {
-                                sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
-                                isFirst = false;
-                            }
-                        }
-                    } catch (parseError) {
-                        logTransportEvent('groq.text.stream_parse_error', {
-                            data,
-                            error: parseError.message,
-                        });
-                    }
-                }
-            }
-        }
+        const { fullText, finishReason } = await streamChatCompletion(response, {
+            onText: displayText => {
+                sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
+                isFirst = false;
+            },
+            onChunk: chunk => logTransportEvent(`${provider.id}.text.stream_chunk`, { chunk }),
+            onEvent: event => logTransportEvent(`${provider.id}.text.stream_event`, event),
+            onParseError: (data, error) =>
+                logTransportEvent(`${provider.id}.text.stream_parse_error`, {
+                    data,
+                    error: error.message,
+                }),
+        });
 
         const cleanedResponse = stripThinkingTags(fullText);
-        const modelKey = modelToUse.split('/').pop();
 
-        const systemPromptChars = (currentSystemPrompt || 'You are a helpful assistant.').length;
-        const historyChars = groqConversationHistory.reduce((sum, msg) => sum + (msg.content || '').length, 0);
-        const inputChars = systemPromptChars + historyChars;
-        const outputChars = cleanedResponse.length;
-
-        incrementCharUsage('groq', modelKey, inputChars + outputChars);
+        if (provider.usageBucket) {
+            const modelKey = modelToUse.split('/').pop();
+            const historyChars = groqConversationHistory.reduce((sum, msg) => sum + (msg.content || '').length, 0);
+            const inputChars = systemPrompt.length + historyChars;
+            incrementCharUsage(provider.usageBucket, modelKey, inputChars + cleanedResponse.length);
+        }
 
         if (cleanedResponse) {
             groqConversationHistory.push({
@@ -394,150 +382,117 @@ async function sendToGroq(transcription) {
 
             saveConversationTurn(transcription, cleanedResponse);
         } else {
-            console.warn(`Groq returned no final answer (${modelToUse})`);
-            logTransportEvent('groq.text.empty_response', {
+            console.warn(`${provider.label} returned no final answer (${modelToUse})`);
+            logTransportEvent(`${provider.id}.text.empty_response`, {
                 model: modelToUse,
                 fullText,
                 finishReason,
             });
-            sendToRenderer('new-response', GROQ_EMPTY_RESPONSE_MESSAGE);
-            sendToRenderer('update-status', 'Groq reached the completion-token limit');
+            sendToRenderer('new-response', emptyResponseMessage(provider, finishReason));
+            sendToRenderer('update-status', `${provider.label} returned an empty response`);
             return;
         }
 
-        logTransportEvent('groq.text.completed', {
+        logTransportEvent(`${provider.id}.text.completed`, {
             model: modelToUse,
             response: cleanedResponse,
         });
-        console.log(`Groq response completed (${modelToUse})`);
+        console.log(`${provider.label} response completed (${modelToUse})`);
         sendToRenderer('update-status', 'Listening...');
     } catch (error) {
-        console.error('Error calling Groq API:', error);
-        logTransportEvent('groq.text.error', {
+        console.error(`Error calling ${provider.label} API:`, error);
+        logTransportEvent(`${provider.id}.text.error`, {
             error: error.message,
             stack: error.stack,
         });
-        sendToRenderer('update-status', 'Groq error: ' + error.message);
+        sendToRenderer('update-status', `${provider.label} error: ` + error.message);
     }
 }
 
-async function sendImageToGroq(base64Data, prompt) {
-    const groqApiKey = getGroqApiKey();
+async function sendImageToProvider(provider, base64Data, prompt) {
+    const apiKey = PROVIDER_KEY_GETTERS[provider.id]();
     const config = getConfig();
-    const model = config.groqImageModel;
+    const model = config[provider.imageModelKey];
 
-    logTransportEvent('groq.image.request', {
+    logTransportEvent(`${provider.id}.image.request`, {
         model,
         prompt,
         imageBytes: Buffer.byteLength(base64Data, 'base64'),
     });
 
     try {
-        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${groqApiKey}`,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                model,
-                messages: [
-                    { role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' },
-                    {
-                        role: 'user',
-                        content: [
-                            { type: 'text', text: prompt },
-                            {
-                                type: 'image_url',
-                                image_url: {
-                                    url: `data:image/jpeg;base64,${base64Data}`,
-                                },
+        const { url, options } = buildChatRequest({
+            provider,
+            apiKey,
+            model,
+            messages: [
+                { role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' },
+                {
+                    role: 'user',
+                    content: [
+                        { type: 'text', text: prompt },
+                        {
+                            type: 'image_url',
+                            image_url: {
+                                url: `data:image/jpeg;base64,${base64Data}`,
                             },
-                        ],
-                    },
-                ],
-                stream: true,
-                temperature: 0.7,
-                max_completion_tokens: GROQ_MAX_COMPLETION_TOKENS,
-                ...getGroqReasoningOptions(model, config.disableGroqThinking),
-            }),
+                        },
+                    ],
+                },
+            ],
+            thinkingDisabled: config.disableGroqThinking,
         });
+
+        const response = await fetch(url, options);
 
         if (!response.ok) {
             const errorText = await response.text();
-            console.error('Groq image API error:', response.status, errorText);
-            logTransportEvent('groq.image.http_error', {
+            console.error(`${provider.label} image API error:`, response.status, errorText);
+            logTransportEvent(`${provider.id}.image.http_error`, {
                 status: response.status,
                 body: errorText,
             });
-            return { success: false, error: `Groq error: ${response.status}` };
+            return { success: false, error: `${provider.label} error: ${response.status}` };
         }
 
-        logTransportEvent('groq.image.http_response', {
+        logTransportEvent(`${provider.id}.image.http_response`, {
             status: response.status,
         });
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let fullText = '';
         let isFirst = true;
-        let finishReason = null;
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value, { stream: true });
-            logTransportEvent('groq.image.stream_chunk', { chunk });
-            const lines = chunk.split('\n').filter(line => line.trim() !== '');
-
-            for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-
-                const data = line.slice(6);
-                if (data === '[DONE]') continue;
-
-                try {
-                    const json = JSON.parse(data);
-                    logTransportEvent('groq.image.stream_event', json);
-                    finishReason = json.choices?.[0]?.finish_reason || finishReason;
-                    const token = json.choices?.[0]?.delta?.content || '';
-                    if (!token) continue;
-
-                    fullText += token;
-                    const displayText = stripThinkingTags(fullText);
-                    if (displayText) {
-                        sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
-                        isFirst = false;
-                    }
-                } catch (parseError) {
-                    logTransportEvent('groq.image.stream_parse_error', {
-                        data,
-                        error: parseError.message,
-                    });
-                }
-            }
-        }
+        const { fullText, finishReason } = await streamChatCompletion(response, {
+            onText: displayText => {
+                sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
+                isFirst = false;
+            },
+            onChunk: chunk => logTransportEvent(`${provider.id}.image.stream_chunk`, { chunk }),
+            onEvent: event => logTransportEvent(`${provider.id}.image.stream_event`, event),
+            onParseError: (data, error) =>
+                logTransportEvent(`${provider.id}.image.stream_parse_error`, {
+                    data,
+                    error: error.message,
+                }),
+        });
 
         const cleanedResponse = stripThinkingTags(fullText);
         if (!cleanedResponse) {
-            logTransportEvent('groq.image.empty_response', {
+            logTransportEvent(`${provider.id}.image.empty_response`, {
                 model,
                 fullText,
                 finishReason,
             });
-            return { success: false, error: GROQ_EMPTY_RESPONSE_MESSAGE };
+            return { success: false, error: emptyResponseMessage(provider, finishReason) };
         }
 
         saveScreenAnalysis(prompt, cleanedResponse, model);
-        logTransportEvent('groq.image.completed', {
+        logTransportEvent(`${provider.id}.image.completed`, {
             model,
             response: cleanedResponse,
         });
         return { success: true, text: cleanedResponse, model };
     } catch (error) {
-        console.error('Error calling Groq image API:', error);
-        logTransportEvent('groq.image.error', {
+        console.error(`Error calling ${provider.label} image API:`, error);
+        logTransportEvent(`${provider.id}.image.error`, {
             error: error.message,
             stack: error.stack,
         });
@@ -684,10 +639,10 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     }
 
                     if (message.serverContent?.inputTranscription) {
-                        sendFinalTranscriptionToGroq();
+                        scheduleAnswerForSettledTranscription();
                     }
 
-                    if (!hasGroqKey() && message.serverContent?.outputTranscription?.text) {
+                    if (message.serverContent?.outputTranscription?.text && !getAnswerProvider()) {
                         const isFirstChunk = messageBuffer === '';
                         messageBuffer += message.serverContent.outputTranscription.text;
                         sendToRenderer(isFirstChunk ? 'new-response' : 'update-response', messageBuffer);
@@ -695,7 +650,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
 
                     if (message.serverContent?.generationComplete) {
                         if (currentTranscription.trim() !== '') {
-                            if (!hasGroqKey() && messageBuffer.trim() !== '') {
+                            if (messageBuffer.trim() !== '' && !getAnswerProvider()) {
                                 saveConversationTurn(currentTranscription, messageBuffer);
                             }
                             currentTranscription = '';
@@ -704,6 +659,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     }
 
                     if (message.serverContent?.turnComplete) {
+                        clearTranscriptionSettleTimer();
                         currentTranscription = '';
                         messageBuffer = '';
                         groqRequestStartedForTurn = false;
@@ -1197,7 +1153,8 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
                 return result;
             }
 
-            const result = hasGroqKey() ? await sendImageToGroq(data, prompt) : await sendImageToGeminiHttp(data, prompt);
+            const imageProvider = getAnswerProvider();
+            const result = imageProvider ? await sendImageToProvider(imageProvider, data, prompt) : await sendImageToGeminiHttp(data, prompt);
             return result;
         } catch (error) {
             console.error('Error sending image:', error);
@@ -1236,9 +1193,10 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         try {
             console.log('Sending text message:', text);
 
-            if (hasGroqKey()) {
+            const textProvider = getAnswerProvider();
+            if (textProvider) {
                 groqRequestStartedForTurn = true;
-                sendToGroq(text.trim());
+                sendTextToProvider(textProvider, text.trim());
             }
 
             await geminiSessionRef.current.sendRealtimeInput({ text: text.trim() });
@@ -1296,6 +1254,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
 
             // Set flag to prevent reconnection attempts
             isUserClosing = true;
+            clearTranscriptionSettleTimer();
             sessionParams = null;
 
             // Cleanup session

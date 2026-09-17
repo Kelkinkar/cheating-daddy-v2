@@ -19,7 +19,7 @@
 - **Default model for both new config keys:** `qwen/qwen3.8-27b` (verified on OpenRouter as `input_modalities: ['text','image','video']`).
 - **No error cascade.** A failed OpenRouter call surfaces to the status line and stops. It must never silently retry against Groq or Gemini.
 - **Formatting:** run `npx prettier --write <changed files>` before every commit. Prettier config is 4-space indent, print width 150, single quotes, semicolons.
-- **Behavior for existing users must not change.** With no OpenRouter key set, every code path must behave exactly as it does at `master` @ `3cccc36`.
+- **Behavior for existing users must not change,** with exactly one documented exception. With no OpenRouter key set, every code path must behave as it does at `master` @ `3cccc36`, **except** the SSE partial-frame buffering fix specified in Task 3. That fix makes the Groq path strictly more reliable — today's inline loops drop a JSON frame that splits across two network reads — and was explicitly approved as an intentional deviation. No other behavioral change to the Groq or Gemini paths is permitted.
 
 ---
 
@@ -58,10 +58,10 @@
 
 - [ ] **Step 1: Add the test script**
 
-In `package.json`, inside `"scripts"`, add a `test` entry directly above `"lint"`:
+In `package.json`, inside `"scripts"`, add a `test` entry directly above `"lint"`. Node's bare `--test` auto-discovers `*.test.js` and skips `node_modules`; do NOT write `node --test test/`, which Node 24 rejects as a module path:
 
 ```json
-"test": "node --test test/",
+"test": "node --test",
 ```
 
 - [ ] **Step 2: Write the failing tests**
@@ -408,6 +408,8 @@ git commit -m "feat: add provider descriptors and shared chat request builder"
   - `handlers` — `{ onText?, onChunk?, onEvent?, onParseError? }`. `onText(displayText)` receives the cumulative thinking-stripped text and is called only when that text is non-empty.
 
 > **Deliberate deviation, flag at review:** the existing inline loops in `sendToGroq`/`sendImageToGroq` split each network chunk on `\n` without carrying a partial trailing line into the next chunk, so a JSON frame split across two TCP reads is silently dropped as a parse error. This implementation buffers the partial line, matching the correct pattern already used by `readStreamingResponse` in `src/utils/localai.js:186-208`. It makes the Groq path strictly more reliable; it does not change any user-visible behavior other than dropping fewer tokens.
+>
+> **Amended during execution:** review found the first implementation still dropped a final frame when a stream closed without a trailing newline — the loop broke on `done` without draining `pendingLine`. The same gap exists in the cited `localai.js` reference. The shipped version hoists the per-line body into a `processLine` closure and calls it once more after the loop. Covered by the test 'processes a final frame with no trailing newline'.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -823,8 +825,9 @@ const PROVIDER_KEY_GETTERS = {
 // Resolves who answers this turn. Precedence is OpenRouter, then Groq, then null.
 // null means Gemini Live answers directly, which is the behavior when no provider key is set.
 function getAnswerProvider() {
-    if ((getOpenRouterApiKey() || '').trim() !== '') return PROVIDERS.openrouter;
-    if ((getGroqApiKey() || '').trim() !== '') return PROVIDERS.groq;
+    const credentials = getCredentials();
+    if ((credentials.openrouterApiKey || '').trim() !== '') return PROVIDERS.openrouter;
+    if ((credentials.groqApiKey || '').trim() !== '') return PROVIDERS.groq;
     return null;
 }
 ```
@@ -1099,7 +1102,7 @@ async function sendImageToProvider(provider, base64Data, prompt) {
 
 - [ ] **Step 8: Rewire the four remaining call sites**
 
-Line ~690, Gemini Live output transcription suppression:
+Line ~690, Gemini Live output transcription suppression. The cheap in-memory check goes FIRST so the disk-reading resolver short-circuits away on the many messages carrying no transcription:
 
 ```js
                     if (!getAnswerProvider() && message.serverContent?.outputTranscription?.text) {
