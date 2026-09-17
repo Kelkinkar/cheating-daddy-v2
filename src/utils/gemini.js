@@ -60,6 +60,12 @@ let systemAudioProc = null;
 let messageBuffer = '';
 let groqRequestStartedForTurn = false;
 
+// Gemini Live streams input transcription in fragments ~120ms apart. Answering on the first
+// fragment sends a 2-4 character question ("What"), so wait for the stream to settle. Measured:
+// max inter-fragment gap 244ms, full question 0.67s, so 800ms leaves ~3x margin.
+const TRANSCRIPTION_SETTLE_MS = 800;
+let transcriptionSettleTimer = null;
+
 function emptyResponseMessage(provider) {
     return `${provider.label} reached the maximum completion-token limit before returning a final answer. Disable thinking in Home → AI responses and try again.`;
 }
@@ -96,6 +102,7 @@ function initializeNewSession(profile = null, customPrompt = null) {
     startTransportLog(currentSessionId);
     currentTranscription = '';
     groqRequestStartedForTurn = false;
+    clearTranscriptionSettleTimer();
     conversationHistory = [];
     screenAnalysisHistory = [];
     groqConversationHistory = [];
@@ -233,6 +240,21 @@ function getAnswerProvider() {
     if ((credentials.openrouterApiKey || '').trim() !== '') return PROVIDERS.openrouter;
     if ((credentials.groqApiKey || '').trim() !== '') return PROVIDERS.groq;
     return null;
+}
+
+function clearTranscriptionSettleTimer() {
+    if (transcriptionSettleTimer) {
+        clearTimeout(transcriptionSettleTimer);
+        transcriptionSettleTimer = null;
+    }
+}
+
+function scheduleAnswerForSettledTranscription() {
+    clearTranscriptionSettleTimer();
+    transcriptionSettleTimer = setTimeout(() => {
+        transcriptionSettleTimer = null;
+        sendFinalTranscriptionToAnswerProvider();
+    }, TRANSCRIPTION_SETTLE_MS);
 }
 
 function sendFinalTranscriptionToAnswerProvider() {
@@ -613,7 +635,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     }
 
                     if (message.serverContent?.inputTranscription) {
-                        sendFinalTranscriptionToAnswerProvider();
+                        scheduleAnswerForSettledTranscription();
                     }
 
                     if (message.serverContent?.outputTranscription?.text && !getAnswerProvider()) {
@@ -633,6 +655,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     }
 
                     if (message.serverContent?.turnComplete) {
+                        clearTranscriptionSettleTimer();
                         currentTranscription = '';
                         messageBuffer = '';
                         groqRequestStartedForTurn = false;
@@ -1227,6 +1250,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
 
             // Set flag to prevent reconnection attempts
             isUserClosing = true;
+            clearTranscriptionSettleTimer();
             sessionParams = null;
 
             // Cleanup session
