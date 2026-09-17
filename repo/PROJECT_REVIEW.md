@@ -193,8 +193,9 @@ Plain JSON under the OS config dir (`~/.config/cheating-daddy-config` on Linux):
 
 ### Behavioural risks
 
-7. **Groq fires on the first transcription fragment, not the final one.** `sendFinalTranscriptionToGroq`
-   is called from _every_ `inputTranscription` message and latches `groqRequestStartedForTurn = true`.
+7. **The answer provider fires on the first transcription fragment, not the final one.**
+   `sendFinalTranscriptionToAnswerProvider` is called from _every_ `inputTranscription` message and
+   latches `groqRequestStartedForTurn = true`. Still unfixed; OpenRouter inherits it identically.
    Gemini Live's input transcription arrives heavily fragmented, so the answer is frequently generated
    from a partial question, and later fragments of the same utterance are dropped until `turnComplete`.
    This is the root of the "compound question" class of bugs. A debounce on transcription settling, or
