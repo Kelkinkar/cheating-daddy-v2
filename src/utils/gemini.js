@@ -66,8 +66,12 @@ let groqRequestStartedForTurn = false;
 const TRANSCRIPTION_SETTLE_MS = 800;
 let transcriptionSettleTimer = null;
 
-function emptyResponseMessage(provider) {
-    return `${provider.label} reached the maximum completion-token limit before returning a final answer. Disable thinking in Home → AI responses and try again.`;
+function emptyResponseMessage(provider, finishReason) {
+    if (finishReason === 'length') {
+        return `${provider.label} hit the token limit before returning a final answer. Disable thinking in Home → AI responses and try again.`;
+    }
+
+    return `${provider.label} returned an empty response (finish reason: ${finishReason || 'unknown'}). The model may not support a parameter being sent, or may not suit this prompt. Try a different model in Home → AI responses.`;
 }
 
 // Reconnection variables
@@ -384,8 +388,8 @@ async function sendTextToProvider(provider, transcription) {
                 fullText,
                 finishReason,
             });
-            sendToRenderer('new-response', emptyResponseMessage(provider));
-            sendToRenderer('update-status', `${provider.label} reached the completion-token limit`);
+            sendToRenderer('new-response', emptyResponseMessage(provider, finishReason));
+            sendToRenderer('update-status', `${provider.label} returned an empty response`);
             return;
         }
 
@@ -477,7 +481,7 @@ async function sendImageToProvider(provider, base64Data, prompt) {
                 fullText,
                 finishReason,
             });
-            return { success: false, error: emptyResponseMessage(provider) };
+            return { success: false, error: emptyResponseMessage(provider, finishReason) };
         }
 
         saveScreenAnalysis(prompt, cleanedResponse, model);

@@ -38,8 +38,8 @@ test('getGroqReasoningOptions returns empty object for other models', () => {
     assert.deepEqual(getGroqReasoningOptions('moonshotai/kimi-k2-instruct', true), {});
 });
 
-test('getOpenRouterReasoningOptions always excludes reasoning from the response', () => {
-    assert.deepEqual(getOpenRouterReasoningOptions('qwen/qwen3.8-27b', false), { reasoning: { exclude: true } });
+test('getOpenRouterReasoningOptions omits reasoning when thinking is not disabled', () => {
+    assert.deepEqual(getOpenRouterReasoningOptions('qwen/qwen3.8-27b', false), {});
 });
 
 test('getOpenRouterReasoningOptions suppresses generation when thinking is disabled', () => {
@@ -212,4 +212,44 @@ test('streamChatCompletion processes a final frame with no trailing newline', as
     const result = await streamChatCompletion(responseFrom([frame]), {});
 
     assert.equal(result.fullText, 'last token');
+});
+
+test('buildChatRequest uses max_tokens for openrouter, not max_completion_tokens', () => {
+    const { options } = buildChatRequest({
+        provider: PROVIDERS.openrouter,
+        apiKey: 'sk-test',
+        model: 'qwen/qwen3.8-27b',
+        messages: [],
+        thinkingDisabled: true,
+    });
+
+    const body = JSON.parse(options.body);
+    assert.equal(body.max_tokens, 16384);
+    assert.equal(body.max_completion_tokens, undefined);
+});
+
+test('buildChatRequest uses max_completion_tokens for groq, not max_tokens', () => {
+    const { options } = buildChatRequest({
+        provider: PROVIDERS.groq,
+        apiKey: 'gsk-test',
+        model: 'qwen/qwen3.6-27b',
+        messages: [],
+        thinkingDisabled: true,
+    });
+
+    const body = JSON.parse(options.body);
+    assert.equal(body.max_completion_tokens, 16384);
+    assert.equal(body.max_tokens, undefined);
+});
+
+test('buildChatRequest omits reasoning for openrouter when thinking is enabled', () => {
+    const { options } = buildChatRequest({
+        provider: PROVIDERS.openrouter,
+        apiKey: 'sk-test',
+        model: 'qwen/qwen3-235b-a22b-2507',
+        messages: [],
+        thinkingDisabled: false,
+    });
+
+    assert.equal(JSON.parse(options.body).reasoning, undefined);
 });

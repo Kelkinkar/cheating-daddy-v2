@@ -34,15 +34,15 @@ function getGroqReasoningOptions(model, disableThinking) {
 }
 
 function getOpenRouterReasoningOptions(model, disableThinking) {
-    // exclude:true mirrors Groq's always-on reasoning_format:'hidden' — keep reasoning out of the
-    // streamed content. effort:'none' mirrors reasoning_effort:'none' — actually stop generating it.
-    const reasoning = { exclude: true };
-
-    if (disableThinking) {
-        reasoning.effort = 'none';
+    // Only send `reasoning` when the user actually asked to disable thinking. Many OpenRouter
+    // models do not list `reasoning` in their supported_parameters, and sending it to them has
+    // produced empty completions. Any visible thinking that slips through is removed downstream
+    // by stripThinkingTags.
+    if (!disableThinking) {
+        return {};
     }
 
-    return { reasoning };
+    return { reasoning: { exclude: true, effort: 'none' } };
 }
 
 const MAX_COMPLETION_TOKENS = 16384;
@@ -56,6 +56,8 @@ const PROVIDERS = {
         textModelKey: 'groqModel',
         imageModelKey: 'groqImageModel',
         usageBucket: 'groq',
+        // Groq's OpenAI-compatible API accepts the newer name.
+        maxTokensParam: 'max_completion_tokens',
         extraHeaders: {},
         reasoningOptions: getGroqReasoningOptions,
     },
@@ -67,6 +69,9 @@ const PROVIDERS = {
         imageModelKey: 'openrouterImageModel',
         // OpenRouter is prepaid credit with no daily free-tier allowance to protect, so no bucket.
         usageBucket: null,
+        // OpenRouter's per-model supported_parameters list max_tokens, not max_completion_tokens.
+        // Sending the wrong name is silently dropped, leaving generation uncapped.
+        maxTokensParam: 'max_tokens',
         extraHeaders: {
             'HTTP-Referer': 'https://cheatingdaddy.com',
             'X-Title': 'Cheating Daddy',
@@ -90,7 +95,7 @@ function buildChatRequest({ provider, apiKey, model, messages, thinkingDisabled 
                 messages,
                 stream: true,
                 temperature: TEMPERATURE,
-                max_completion_tokens: MAX_COMPLETION_TOKENS,
+                [provider.maxTokensParam]: MAX_COMPLETION_TOKENS,
                 ...provider.reasoningOptions(model, thinkingDisabled),
             }),
         },
