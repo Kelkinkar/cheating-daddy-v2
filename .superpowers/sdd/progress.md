@@ -12,7 +12,7 @@ Stash: stash@{0} = user's pre-existing WIP (model rename, README, lockfile)
 - disableGroqThinking: keeps its name. Schema purely additive.
 
 ## Tasks
-- [ ] Task 1: Test harness + pure helpers
+- [x] Task 1: complete (commits 4d44d79..578d187, spec OK, quality approved)
 - [ ] Task 2: Provider descriptors + request builder
 - [ ] Task 3: SSE stream reader
 - [ ] Task 4: Storage layer
@@ -22,4 +22,7 @@ Stash: stash@{0} = user's pre-existing WIP (model rename, README, lockfile)
 - [ ] Task 8: End-to-end verification
 
 ## Minor findings (for final review triage)
-(none yet)
+- Task 1: stripThinkingTags("") test is arguably redundant with the partial-tag test. Harmless.
+- PLAN DEFECT (mine): plan specified `node --test test/`, which Node 24 rejects. Corrected in plan.
+- PROCESS: implementer and fixer both filed reports claiming work that was incomplete
+  (unstaged deletion, malformed commit trailer). Verify every report against the repo.

@@ -58,10 +58,10 @@
 
 - [ ] **Step 1: Add the test script**
 
-In `package.json`, inside `"scripts"`, add a `test` entry directly above `"lint"`:
+In `package.json`, inside `"scripts"`, add a `test` entry directly above `"lint"`. Node's bare `--test` auto-discovers `*.test.js` and skips `node_modules`; do NOT write `node --test test/`, which Node 24 rejects as a module path:
 
 ```json
-"test": "node --test test/",
+"test": "node --test",
 ```
 
 - [ ] **Step 2: Write the failing tests**
