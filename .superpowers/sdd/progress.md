@@ -23,7 +23,7 @@ Stash: stash@{0} = user's pre-existing WIP (model rename, README, lockfile)
 - [x] Task 2: complete (commit 9312b2d, spec OK, quality approved)
 - [x] Task 3: complete (commits 11d8170..2cc2894, spec OK, quality approved after 1 fix)
 - [x] Task 4: complete (commit fe35329, spec OK, quality approved, no findings)
-- [ ] Task 5: IPC + renderer wrapper
+- [x] Task 5: complete (commit 1344362, spec OK, quality approved, no findings)
 - [ ] Task 6: gemini.js provider resolution + unified send paths
 - [ ] Task 7: Settings UI
 - [ ] Task 8: End-to-end verification
