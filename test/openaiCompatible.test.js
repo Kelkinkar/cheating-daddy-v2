@@ -47,3 +47,91 @@ test('getOpenRouterReasoningOptions suppresses generation when thinking is disab
         reasoning: { exclude: true, effort: 'none' },
     });
 });
+
+const { PROVIDERS, buildChatRequest } = require('../src/utils/openaiCompatible');
+
+test('PROVIDERS exposes groq and openrouter descriptors', () => {
+    assert.equal(PROVIDERS.groq.id, 'groq');
+    assert.equal(PROVIDERS.groq.baseUrl, 'https://api.groq.com/openai/v1');
+    assert.equal(PROVIDERS.groq.usageBucket, 'groq');
+    assert.equal(PROVIDERS.groq.textModelKey, 'groqModel');
+    assert.equal(PROVIDERS.groq.imageModelKey, 'groqImageModel');
+
+    assert.equal(PROVIDERS.openrouter.id, 'openrouter');
+    assert.equal(PROVIDERS.openrouter.baseUrl, 'https://openrouter.ai/api/v1');
+    assert.equal(PROVIDERS.openrouter.usageBucket, null);
+    assert.equal(PROVIDERS.openrouter.textModelKey, 'openrouterModel');
+    assert.equal(PROVIDERS.openrouter.imageModelKey, 'openrouterImageModel');
+});
+
+test('buildChatRequest targets the provider chat-completions endpoint', () => {
+    const { url } = buildChatRequest({
+        provider: PROVIDERS.openrouter,
+        apiKey: 'sk-test',
+        model: 'qwen/qwen3.8-27b',
+        messages: [{ role: 'user', content: 'hi' }],
+        thinkingDisabled: true,
+    });
+
+    assert.equal(url, 'https://openrouter.ai/api/v1/chat/completions');
+});
+
+test('buildChatRequest sets the auth header and provider extra headers', () => {
+    const { options } = buildChatRequest({
+        provider: PROVIDERS.openrouter,
+        apiKey: 'sk-test',
+        model: 'qwen/qwen3.8-27b',
+        messages: [],
+        thinkingDisabled: false,
+    });
+
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers.Authorization, 'Bearer sk-test');
+    assert.equal(options.headers['Content-Type'], 'application/json');
+    assert.equal(options.headers['HTTP-Referer'], 'https://cheatingdaddy.com');
+    assert.equal(options.headers['X-Title'], 'Cheating Daddy');
+});
+
+test('buildChatRequest omits extra headers for groq', () => {
+    const { options } = buildChatRequest({
+        provider: PROVIDERS.groq,
+        apiKey: 'gsk-test',
+        model: 'qwen/qwen3.6-27b',
+        messages: [],
+        thinkingDisabled: false,
+    });
+
+    assert.equal(options.headers['HTTP-Referer'], undefined);
+    assert.equal(options.headers.Authorization, 'Bearer gsk-test');
+});
+
+test('buildChatRequest streams and applies shared generation settings', () => {
+    const { options } = buildChatRequest({
+        provider: PROVIDERS.groq,
+        apiKey: 'gsk-test',
+        model: 'qwen/qwen3.6-27b',
+        messages: [{ role: 'user', content: 'hi' }],
+        thinkingDisabled: true,
+    });
+
+    const body = JSON.parse(options.body);
+    assert.equal(body.model, 'qwen/qwen3.6-27b');
+    assert.equal(body.stream, true);
+    assert.equal(body.temperature, 0.7);
+    assert.equal(body.max_completion_tokens, 16384);
+    assert.deepEqual(body.messages, [{ role: 'user', content: 'hi' }]);
+    assert.equal(body.reasoning_effort, 'none');
+});
+
+test('buildChatRequest merges per-provider reasoning options into the body', () => {
+    const { options } = buildChatRequest({
+        provider: PROVIDERS.openrouter,
+        apiKey: 'sk-test',
+        model: 'qwen/qwen3.8-27b',
+        messages: [],
+        thinkingDisabled: true,
+    });
+
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.reasoning, { exclude: true, effort: 'none' });
+});

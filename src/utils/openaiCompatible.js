@@ -45,7 +45,61 @@ function getOpenRouterReasoningOptions(model, disableThinking) {
     return { reasoning };
 }
 
+const MAX_COMPLETION_TOKENS = 16384;
+const TEMPERATURE = 0.7;
+
+const PROVIDERS = {
+    groq: {
+        id: 'groq',
+        label: 'Groq',
+        baseUrl: 'https://api.groq.com/openai/v1',
+        textModelKey: 'groqModel',
+        imageModelKey: 'groqImageModel',
+        usageBucket: 'groq',
+        extraHeaders: {},
+        reasoningOptions: getGroqReasoningOptions,
+    },
+    openrouter: {
+        id: 'openrouter',
+        label: 'OpenRouter',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        textModelKey: 'openrouterModel',
+        imageModelKey: 'openrouterImageModel',
+        // OpenRouter is prepaid credit with no daily free-tier allowance to protect, so no bucket.
+        usageBucket: null,
+        extraHeaders: {
+            'HTTP-Referer': 'https://cheatingdaddy.com',
+            'X-Title': 'Cheating Daddy',
+        },
+        reasoningOptions: getOpenRouterReasoningOptions,
+    },
+};
+
+function buildChatRequest({ provider, apiKey, model, messages, thinkingDisabled }) {
+    return {
+        url: `${provider.baseUrl}/chat/completions`,
+        options: {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+                ...provider.extraHeaders,
+            },
+            body: JSON.stringify({
+                model,
+                messages,
+                stream: true,
+                temperature: TEMPERATURE,
+                max_completion_tokens: MAX_COMPLETION_TOKENS,
+                ...provider.reasoningOptions(model, thinkingDisabled),
+            }),
+        },
+    };
+}
+
 module.exports = {
+    PROVIDERS,
+    buildChatRequest,
     stripThinkingTags,
     getGroqReasoningOptions,
     getOpenRouterReasoningOptions,
