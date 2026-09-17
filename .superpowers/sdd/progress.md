@@ -25,10 +25,13 @@ Stash: stash@{0} = user's pre-existing WIP (model rename, README, lockfile)
 - [x] Task 4: complete (commit fe35329, spec OK, quality approved, no findings)
 - [x] Task 5: complete (commit 1344362, spec OK, quality approved, no findings)
 - [x] Task 6: complete (commits 0b5b84e..7c5b64d, spec OK, quality approved after 1 perf fix)
-- [ ] Task 7: Settings UI
-- [ ] Task 8: End-to-end verification
+- [x] Task 7: complete (commit dc6342d, spec OK, quality approved, 1 Minor logged)
+- [~] Task 8: automated+doc portions done by controller; MANUAL 4x3 matrix awaits the human
 
 ## Minor findings (for final review triage)
+- Task 7: the three new _saveOpenRouter* handlers omit the trailing this.requestUpdate() that every
+  other save handler in MainView.js calls. Harmless - Lit `state: true` props already schedule a
+  re-render, so the existing calls are themselves redundant. Stylistic inconsistency only.
 - Task 6: currentSystemPrompt is now snapshotted BEFORE the request for usage accounting rather
   than re-read after. More correct (bills the prompt actually sent); differs only if reassigned mid-stream.
 - Task 6: a bare `data: ` line with empty payload no longer emits a stream_parse_error. Log-only.
