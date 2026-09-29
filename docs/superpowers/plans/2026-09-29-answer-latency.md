@@ -737,3 +737,24 @@ split rate is about 9% under every policy. No timer <= 1500ms bridges these paus
 threading (Task 4) the fix, and the end-of-turn trigger is free latency.
 
 Added to Task 3: don't send a transcription that is only `<noise>` or similar non-speech tags.
+
+### Task 2: scripted live test (native-audio `gemini-2.5-flash-native-audio-preview-09-2025`)
+
+- Gemini's end-of-turn decision (first model output) lands 700-1000ms after real speech end, and transcription
+  lags speech by 150-300ms.
+- `silenceDurationMs` 300 / default / 1200 made no measurable difference; 2000 only slowed end-of-turn (2.1-3.9s).
+  **Decision: leave VAD at default** (Task 3 Step 5 skipped).
+- Pauses of 1000ms and up split every time under every setting, which matches the log replay: splits are handled
+  by threading, not by tuning.
+- **New failure found:** once Gemini starts its own (discarded) spoken reply, the interviewer's continuation is
+  transcribed only after `interrupted` -> `turnComplete`, **2-4s late**, and in 7 of 22 matrix trials it was **never
+  transcribed at all**.
+- `gemini-3.5-transcribe-live` (TEXT modality, no spoken reply): returns each utterance whole with an immediate
+  `generationComplete`, 1.0-1.4s after speech end. **9/9 continuations captured**, no late transcripts. It splits
+  at any pause of 500ms or more.
+- Fallback settle timer stays at 1500ms: it only fires when Gemini gives no end-of-turn signal.
+
+### Task 5: connection warm-up
+
+Cold (after 6s idle) 624/384/441/408/393ms vs warm 141/129/132/142/132ms to `openrouter.ai/api/v1/key`.
+About 270ms saved per answer. Implemented.
