@@ -62,8 +62,11 @@ let groqRequestStartedForTurn = false;
 
 // Gemini Live streams input transcription in fragments ~120ms apart. Answering on the first
 // fragment sends a 2-4 character question ("What"), so wait for the stream to settle. Measured:
-// max inter-fragment gap 244ms, full question 0.67s, so 800ms leaves ~3x margin.
-const TRANSCRIPTION_SETTLE_MS = 800;
+// max inter-fragment gap 244ms, full question 0.67s. Raised from 800ms to 1500ms to also absorb
+// mid-sentence pauses, so a speaker who hesitates is still treated as one question. The cost is
+// latency before the answer starts; flushPendingTranscription keeps a turn that ends inside the
+// window from being dropped, which is what makes the longer wait safe.
+const TRANSCRIPTION_SETTLE_MS = 1500;
 let transcriptionSettleTimer = null;
 
 function emptyResponseMessage(provider, finishReason) {
@@ -71,7 +74,7 @@ function emptyResponseMessage(provider, finishReason) {
         return `${provider.label} hit the token limit before returning a final answer. Disable thinking in Home → AI responses and try again.`;
     }
 
-    return `${provider.label} returned an empty response (finish reason: ${finishReason || 'unknown'}). The model may not support a parameter being sent, or may not suit this prompt. Try a different model in Home → AI responses.`;
+    return `${provider.label} returned an empty response twice in a row (finish reason: ${finishReason || 'unknown'}). This is usually a flaky upstream provider rather than a bad request. Ask again, or try a different model in Home → AI responses.`;
 }
 
 // Reconnection variables
@@ -261,6 +264,19 @@ function scheduleAnswerForSettledTranscription() {
     }, TRANSCRIPTION_SETTLE_MS);
 }
 
+// A turn can end inside the settle window: Gemini finishes generating fast on short input, so
+// its generationComplete/turnComplete can arrive before the settle timer fires. Cancelling the
+// timer there dropped the question with no answer and no error, so flush it instead. Safe to
+// call twice per turn - sendFinalTranscriptionToAnswerProvider guards on groqRequestStartedForTurn.
+function flushPendingTranscription() {
+    if (!transcriptionSettleTimer) {
+        return;
+    }
+
+    clearTranscriptionSettleTimer();
+    sendFinalTranscriptionToAnswerProvider();
+}
+
 function sendFinalTranscriptionToAnswerProvider() {
     const provider = getAnswerProvider();
     if (!provider || groqRequestStartedForTurn) {
@@ -290,6 +306,41 @@ function trimConversationHistoryForGemma(history, maxChars = 42000) {
         trimmed.unshift(turn);
     }
     return trimmed;
+}
+
+// One request/stream cycle. Returns { fullText, finishReason } on success, or { httpError } when the
+// call itself failed, so the caller can retry a valid-but-empty generation without retrying an error.
+async function streamProviderAnswer({ provider, apiKey, model, messages, thinkingDisabled, onDisplayText }) {
+    const { url, options } = buildChatRequest({ provider, apiKey, model, messages, thinkingDisabled });
+
+    const response = await fetch(url, options);
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`${provider.label} API error:`, response.status, errorText);
+        logTransportEvent(`${provider.id}.text.http_error`, {
+            status: response.status,
+            body: errorText,
+        });
+        return { httpError: response.status };
+    }
+
+    logTransportEvent(`${provider.id}.text.http_response`, { status: response.status });
+
+    let isFirst = true;
+    return await streamChatCompletion(response, {
+        onText: displayText => {
+            onDisplayText(displayText, isFirst);
+            isFirst = false;
+        },
+        onChunk: chunk => logTransportEvent(`${provider.id}.text.stream_chunk`, { chunk }),
+        onEvent: event => logTransportEvent(`${provider.id}.text.stream_event`, event),
+        onParseError: (data, error) =>
+            logTransportEvent(`${provider.id}.text.stream_parse_error`, {
+                data,
+                error: error.message,
+            }),
+    });
 }
 
 async function sendTextToProvider(provider, transcription) {
@@ -325,47 +376,43 @@ async function sendTextToProvider(provider, transcription) {
     const systemPrompt = currentSystemPrompt || 'You are a helpful assistant.';
 
     try {
-        const { url, options } = buildChatRequest({
+        const attemptOptions = {
             provider,
             apiKey,
             model: modelToUse,
             messages: [{ role: 'system', content: systemPrompt }, ...groqConversationHistory],
             thinkingDisabled: config.disableGroqThinking,
-        });
+            onDisplayText: (displayText, isFirst) => sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText),
+        };
 
-        const response = await fetch(url, options);
-
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error(`${provider.label} API error:`, response.status, errorText);
-            logTransportEvent(`${provider.id}.text.http_error`, {
-                status: response.status,
-                body: errorText,
-            });
-            sendToRenderer('update-status', `${provider.label} error: ${response.status}`);
+        let attempt = await streamProviderAnswer(attemptOptions);
+        if (attempt.httpError) {
+            sendToRenderer('update-status', `${provider.label} error: ${attempt.httpError}`);
             return;
         }
 
-        logTransportEvent(`${provider.id}.text.http_response`, {
-            status: response.status,
-        });
+        let cleanedResponse = stripThinkingTags(attempt.fullText);
 
-        let isFirst = true;
-        const { fullText, finishReason } = await streamChatCompletion(response, {
-            onText: displayText => {
-                sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
-                isFirst = false;
-            },
-            onChunk: chunk => logTransportEvent(`${provider.id}.text.stream_chunk`, { chunk }),
-            onEvent: event => logTransportEvent(`${provider.id}.text.stream_event`, event),
-            onParseError: (data, error) =>
-                logTransportEvent(`${provider.id}.text.stream_parse_error`, {
-                    data,
-                    error: error.message,
-                }),
-        });
+        // OpenRouter fans a model out across many upstream providers, and one occasionally returns a
+        // clean `stop` with no content at all (observed: completion_tokens 1, empty delta, HTTP 200).
+        // It is an upstream flake rather than a bad request, and a retry usually lands elsewhere, so
+        // spend one. A 'length' finish is a real cap being hit and would just fail again.
+        if (!cleanedResponse && attempt.finishReason !== 'length') {
+            console.warn(`${provider.label} returned an empty generation, retrying once`);
+            logTransportEvent(`${provider.id}.text.empty_retry`, {
+                model: modelToUse,
+                finishReason: attempt.finishReason,
+            });
 
-        const cleanedResponse = stripThinkingTags(fullText);
+            attempt = await streamProviderAnswer(attemptOptions);
+            if (attempt.httpError) {
+                sendToRenderer('update-status', `${provider.label} error: ${attempt.httpError}`);
+                return;
+            }
+            cleanedResponse = stripThinkingTags(attempt.fullText);
+        }
+
+        const { fullText, finishReason } = attempt;
 
         if (provider.usageBucket) {
             const modelKey = modelToUse.split('/').pop();
@@ -649,6 +696,8 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     }
 
                     if (message.serverContent?.generationComplete) {
+                        // Must run before currentTranscription is cleared below.
+                        flushPendingTranscription();
                         if (currentTranscription.trim() !== '') {
                             if (messageBuffer.trim() !== '' && !getAnswerProvider()) {
                                 saveConversationTurn(currentTranscription, messageBuffer);
@@ -659,7 +708,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     }
 
                     if (message.serverContent?.turnComplete) {
-                        clearTranscriptionSettleTimer();
+                        flushPendingTranscription();
                         currentTranscription = '';
                         messageBuffer = '';
                         groqRequestStartedForTurn = false;
