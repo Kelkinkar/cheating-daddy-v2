@@ -53,9 +53,23 @@ Follow these guidelines when working on UI code:
 
 ## Tests
 
-No automated tests yet. When a suite is added, run `npm test` before each
-commit. Until then, at minimum ensure `npm install` and `npm start` work after
-merging upstream changes.
+`npm test` runs the Node built-in test runner (`node --test`). The suite currently
+covers `src/utils/openaiCompatible.js` — provider descriptors, per-provider request
+building, and the shared SSE reader — in `test/openaiCompatible.test.js` (26 tests).
+Run it before each commit, and extend it when touching provider or streaming logic.
+
+Most of the app is not unit-testable as written: `gemini.js` and the Lit views pull in
+Electron at module load. Two techniques have worked well instead, and both are worth
+reaching for before claiming a fix:
+
+- **Replay a real session log.** `transportLogger` writes every session to
+  `<config>/logs/<sessionId>.json` with timestamps. Replaying those events against the
+  logic under test reproduces timing bugs that are impossible to trigger by hand — this
+  is how the dropped-question race in §7 of `repo/PROJECT_REVIEW.md` was both found and
+  verified.
+- **Extract the pure function.** Logic such as `unwrapWrapperFence` in `AssistantView`
+  can be pulled out of the source and exercised in plain Node against real payloads from
+  those same logs.
 
 ## Merging upstream PRs
 
@@ -92,7 +106,7 @@ uses Electron. Key goals are:
 1. Research and prototype local transcription using `whisper.cpp`.
 2. Add dual‑stream audio capture logic for cross‑platform support.
 3. Investigate speaker diarization options and integrate when feasible.
-4. Plan a migration path toward a proper testing setup (Jest or similar).
+4. Extend test coverage beyond `openaiCompatible.js` (a `node --test` suite now exists).
 5. Document security considerations for audio storage and processing.
 6. Rebuild the entire UI using shadcn components.
 

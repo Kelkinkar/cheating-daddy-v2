@@ -22,7 +22,12 @@ A real-time AI assistant that provides contextual help during video calls, inter
 
 - **Live AI Assistance**: Real-time help powered by Google Gemini 2.0 Flash Live
 - **Screen & Audio Capture**: Analyzes what you see and hear for contextual responses
-- **Multiple Profiles**: Interview, Sales Call, Business Meeting, Presentation, Negotiation
+- **Pluggable Answer Provider**: Gemini Live transcribes, and OpenRouter or Groq can write the
+  answers instead of Gemini. Precedence is OpenRouter → Groq → Gemini Live itself; set a key in
+  Home → AI responses to switch, or leave both blank to let Gemini answer
+- **Offline Mode**: A fully local pipeline (whisper.cpp + llama.cpp, downloaded on demand) on
+  macOS and Windows
+- **Multiple Profiles**: Interview, Sales Call, Business Meeting, Presentation, Negotiation, Exam
 - **Transparent Overlay**: Always-on-top window that can be positioned anywhere
 - **Click-through Mode**: Make window transparent to clicks when needed
 - **Cross-platform**: Works on macOS, Windows, and Linux (kinda, dont use, just for testing rn)
@@ -40,6 +45,24 @@ A real-time AI assistant that provides contextual help during video calls, inter
 3. Click "Start Session" to begin
 4. Position the window using keyboard shortcuts
 5. The AI will provide real-time assistance based on your screen and what interview asks
+
+## Response Length
+
+Answer length and voice are controlled by the system prompts in `src/utils/prompts.js`, not by a
+token limit. Each profile's `formatRequirements` sets a sentence target and a hard word cap — the
+interview profile aims for 4-6 sentences capped at 150 words, the sales/meeting/presentation/
+negotiation profiles for 3-5 sentences capped at 120, and exam stays at 1-2 for speed.
+
+Answers are written in **first person**, as the words you speak, rather than as advice addressed to
+you. Two rules hold that in place and are worth keeping if you edit the prompts: no section
+headings, and at most one flat list. Without them the model slides into writing a reference
+document, and a document addresses the reader as "you" and runs to a full page.
+
+To change any of this, edit both the rules **and** the few-shot examples in that profile's
+`content`: the examples set the effective floor, so changing the rules alone has little effect.
+
+Longer answers take proportionally longer to finish streaming, which matters in a live
+conversation. See §7 of `repo/PROJECT_REVIEW.md` for the token caps and their caveats.
 
 ## Keyboard Shortcuts
 

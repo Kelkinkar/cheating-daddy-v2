@@ -1,6 +1,7 @@
 # cheating-daddy — Codebase Review
 
-_Reviewed 2026-09-17 against `master` @ `3cccc36` (v0.8.0), plus uncommitted changes in the working tree._
+_Reviewed 2026-09-17 against `master` @ `3cccc36` (v0.8.0). Updated 2026-09-29 against `master` @ `e45dc25`,
+plus uncommitted response-length and rendering work in the working tree (§7)._
 
 Fork of [sohzm/cheating-daddy](https://github.com/sohzm/cheating-daddy). Electron overlay app that listens to
 system/mic audio + screen, and streams AI answers to a transparent always-on-top window. Used as an
@@ -16,7 +17,7 @@ interview/meeting teleprompter.
 | UI             | Lit 2.7 web components, loaded from vendored `src/assets/lit-*.min.js` |
 | Packaging      | Electron Forge 7 (squirrel / dmg / AppImage), `forge.config.js`        |
 | Deps (runtime) | `@google/genai`, `ws`, `electron-squirrel-startup` — that's all        |
-| Tests          | none                                                                   |
+| Tests          | `node --test` — 26 unit tests in `test/openaiCompatible.test.js`       |
 | Lint           | none (`npm run lint` echoes "No linting configured")                   |
 | Format         | Prettier: 4 spaces, width 150, single quotes (`.prettierrc`)           |
 
@@ -78,8 +79,12 @@ precedence is OpenRouter, then Groq, then Gemini Live itself if neither key is s
 
 1. Audio chunks (24 kHz mono PCM, 100 ms) → `sendRealtimeInput`.
 2. `serverContent.inputTranscription` accumulates into `currentTranscription`.
-3. On _any_ inputTranscription message, `sendFinalTranscriptionToAnswerProvider()` fires once per
-   turn (guard `groqRequestStartedForTurn`, reset on `turnComplete`).
+3. Each inputTranscription message (re)arms a 1500 ms settle timer
+   (`scheduleAnswerForSettledTranscription`). When it expires,
+   `sendFinalTranscriptionToAnswerProvider()` fires once per turn (guard
+   `groqRequestStartedForTurn`, reset on `turnComplete`). If a turn ends while the timer is
+   still pending, `flushPendingTranscription()` sends immediately rather than cancelling —
+   see finding #7.
 4. The resolved provider streams back via `sendTextToProvider`; tokens go to the renderer as
    `new-response` / `update-response`.
 5. If **neither** provider key is set, `getAnswerProvider()` returns `null` and Gemini's own
@@ -173,12 +178,11 @@ Plain JSON under the OS config dir (`~/.config/cheating-daddy-config` on Linux):
 
 ### Bugs / dead code
 
-1. **Rate-limit counting is broken (uncommitted change).** `src/storage.js:334,336` now increments on
-   `'gemini-3.7-flash'` / `'gemini-3.5-flash-lite'`, but `getAvailableModel()` (`src/storage.js:392-400`)
-   still returns `'gemini-2.5-flash'` / `'gemini-2.5-flash-lite'`. `incrementLimitCount(model)` is called
-   with the value from `getAvailableModel()`, so **neither branch ever matches** — screenshot requests are
-   no longer counted and the free-tier guard is inert. Either update both or key the counter off a
-   model→bucket map instead of string equality.
+1. ~~**Rate-limit counting is broken (uncommitted change).**~~ **Resolved 2026-09-17.** The offending
+   model-rename was discarded rather than completed; `getAvailableModel()` and `incrementLimitCount()`
+   both use `gemini-2.5-flash` / `gemini-2.5-flash-lite` again and the counter matches. If the rename is
+   ever revisited, key the counter off a model→bucket map instead of string equality so the two cannot
+   drift apart again.
 2. **`src/components/index.js` exports a file that doesn't exist** — `./views/AdvancedView.js`. Nothing
    imports `components/index.js`, so it never throws, but it is stale (it also omits `AICustomizeView`
    and `FeedbackView`).
@@ -193,13 +197,21 @@ Plain JSON under the OS config dir (`~/.config/cheating-daddy-config` on Linux):
 
 ### Behavioural risks
 
-7. **The answer provider fires on the first transcription fragment, not the final one.**
-   `sendFinalTranscriptionToAnswerProvider` is called from _every_ `inputTranscription` message and
-   latches `groqRequestStartedForTurn = true`. Still unfixed; OpenRouter inherits it identically.
-   Gemini Live's input transcription arrives heavily fragmented, so the answer is frequently generated
-   from a partial question, and later fragments of the same utterance are dropped until `turnComplete`.
-   This is the root of the "compound question" class of bugs. A debounce on transcription settling, or
-   waiting for a turn boundary, is the fix.
+7. ~~**The answer provider fires on the first transcription fragment, not the final one.**~~
+   **Resolved, in two parts.**
+    - _2026-09-17:_ answers were generated from 1–4 character fragments ("What") because
+      `sendFinalTranscriptionToAnswerProvider` ran on every `inputTranscription` message. Fixed with an
+      settle timer (`TRANSCRIPTION_SETTLE_MS`); measured max inter-fragment gap was 244 ms. Set to
+      800 ms initially, raised to 1500 ms on 2026-09-29 so mid-sentence pauses do not split one
+      question into two. The trade is latency before the answer starts.
+    - _2026-09-29:_ the settle timer introduced a second, opposite defect — `turnComplete` called
+      `clearTranscriptionSettleTimer()`, so a turn that ended inside the settle window **cancelled the
+      pending answer and dropped the question silently**, with no error and no status change.
+      `generationComplete` had the same hole via clearing `currentTranscription`. Confirmed in
+      `logs/1790637010665.json`: turn 1's `turnComplete` arrived 292 ms after the last fragment and
+      produced no `openrouter.text.request` at all (3 turns, 2 answers). Short questions lose this race
+      because Gemini finishes generating fast on short input. Fixed by `flushPendingTranscription()`,
+      which sends the pending transcription instead of discarding it.
 8. **Gemini Live still generates a full spoken answer even when Groq is answering.** With a Groq key set,
    `outputTranscription` is simply not forwarded to the UI — the tokens are still generated and billed.
    A previous "relay mode" experiment (making Gemini a silent transcriber) was reverted because answer
@@ -214,9 +226,35 @@ Plain JSON under the OS config dir (`~/.config/cheating-daddy-config` on Linux):
 
 11. `contextIsolation: false` + `nodeIntegration: true` is the single biggest structural risk, and it
     directly contradicts `AGENTS.md` ("maintain Electron's context isolation pattern for IPC"). The CSP
-    in `index.html` (`script-src 'self' 'unsafe-inline'`) is the only thing standing between injected
-    markup and full node access. Responses are rendered through `marked` — check the sanitizer settings
-    in `AssistantView` before trusting that.
+    in `index.html` (`script-src 'self' 'unsafe-inline'`) does not help: `'unsafe-inline'` is exactly
+    what permits inline event handlers. **Still open** — the renderer keeps full Node access.
+
+    The response-rendering half of this is **resolved (2026-09-29)**. `AssistantView` calls
+    `marked.parse` with `sanitize: false` and assigns the result to `container.innerHTML`; marked
+    passes raw HTML through untouched, and while `innerHTML` will not run `<script>`, it does create
+    live elements whose inline handlers (`onerror`, `onload`) fire — with `require()` in scope. Model
+    output is the vector, since Google Search grounding and screenshot transcription both carry
+    outside text into a response. `sanitizeDom()` now walks the parsed tree before rendering and
+    applies an allowlist: `ALLOWED_TAGS` for elements marked actually emits, `ALLOWED_ATTRIBUTES`
+    per tag (which is what drops every `on*` handler), and scheme checks on `href`/`src`. Dangerous
+    elements are removed with their subtree; other unknown elements are unwrapped so their text
+    survives. It runs _before_ `wrapWordsInSpans`, so the injected `data-word` spans are not stripped,
+    and the two `renderMarkdown` fallback paths route through `sanitizeHtml()` so a raw string never
+    reaches the sink.
+
+    Verified in a real Electron renderer (`nodeIntegration: false` harness, the app's own
+    `marked-4.3.0`), assigning each payload into a live `innerHTML` sink and inspecting the resulting
+    DOM: 9 payloads (img/onerror, script, svg/onload, iframe and anchor `javascript:`, inline
+    `onmouseover`, object, form+input) go from dangerous nodes and live `on*` attributes present, to
+    zero; 5 legitimate markdown constructs (bold, inline code, lists, fenced code, tables, https
+    links) render unchanged; and both real responses from `logs/1790637010665.json` are byte-identical
+    with and without the sanitizer, so it is a no-op on genuine answers.
+
+    Remaining hardening, not done: `src/index.html:4` could likely drop `'unsafe-inline'` from
+    `script-src`, since all five script tags in that file are external `src=` files and none are
+    inline. That would block inline handlers at the browser level as defence in depth. Needs a
+    smoke-test of the running app before trusting it.
+
 12. Credentials in plaintext JSON (§4) and full transcripts in `<config>/logs`.
 13. On the plus side: downloaded binaries and models are SHA-256 pinned, Forge fuses disable
     `RunAsNode` / `NODE_OPTIONS` / inspect args and enforce ASAR integrity, and local servers bind to
@@ -239,11 +277,58 @@ Treat `AGENTS.md` as direction, not as a description of the repo.
 
 ## 7. Working-tree state at review time
 
+As of the 2026-09-29 update, `master` is at `e45dc25` with three modified files, all from the
+response-length work:
+
 ```
-M README.md          + upstream URL line
-M package-lock.json  dependency pruning (~100 lines removed)
-M src/storage.js     model-name rename that breaks limit counting — see finding #1
+M src/utils/prompts.js                    longer-answer targets + global no-code-fence rule
+M src/components/views/AssistantView.js   wrapper-fence unwrap + wrapping CSS
+M src/utils/gemini.js                     flushPendingTranscription (finding #7)
 ```
+
+### Response length
+
+Answer length is set by the prompts, not by a token cap. `MAX_COMPLETION_TOKENS = 16384`
+(`openaiCompatible.js:48`) is sent as `max_tokens` for OpenRouter and `max_completion_tokens` for
+Groq, and is far above what the prompts ask for — it is not the limiter. The limiter is
+`formatRequirements` in `prompts.js`: the interview profile targets **4–6 sentences, hard-capped at
+150 words**, the sales/meeting/presentation/negotiation profiles **3–5 sentences capped at 120**, and
+exam stays at **1–2** because speed is the point there. Few-shot examples in `promptParts.content`
+set the real floor, so a change to the targets must change the examples too or the model just
+follows the examples.
+
+**Voice and the document-drift failure mode (2026-09-29).** Answers must be first person — the words
+the candidate speaks — not advice addressed to the listener. Three symptoms move together and share
+one cause. Measured across three consecutive sessions on the same model (`qwen3.8-27b`): the first
+two averaged ~156 words with 0–10 first-person pronouns and **zero** bold section headings, while the
+third produced 223–340 words, **zero** first-person pronouns, 5–10 second-person constructions, and
+2–3 headings per answer. Once the model emits a heading such as `**Architecture & Setup**` it has
+decided it is writing a reference document — and documents address the reader as "you" and run to a
+page. The structural rules are therefore the load-bearing ones: **no section headings** and **at most
+one flat list**, alongside the explicit first-person instruction and the word cap (a sentence ceiling
+alone does not bind a bullet list). A fourth example covering the "X vs Y" question shape was added,
+since comparison questions are what triggered the drift.
+
+Note that `groqConversationHistory` feeds assistant turns back into each request, so a single
+document-shaped answer becomes an in-context example for the next one. Prompt rules govern the first
+answer; if drift reappears mid-session, truncating or dropping assistant turns from the replayed
+history is the next lever.
+
+Two caveats that are not bugs: reasoning tokens count against `max_tokens`, so a thinking-enabled
+model can be truncated mid-answer with `finish_reason: 'length'` (surfaced by `emptyResponseMessage`);
+and individual OpenRouter models may cap output below 16384 regardless of what is sent. The local
+llama path caps at 2048 (`localai.js:199`), which is still ~7x the 8-sentence ceiling.
+
+### Response rendering
+
+Models intermittently wrap an entire answer in a ` ```markdown ` fence. `marked` then renders the
+whole response as one `<pre>`, which shows literal `**` markers and scrolls horizontally instead of
+wrapping — observed in `logs/1790637010665.json`, where one of two answers was fenced and the other
+was not. Handled at three levels: `unwrapWrapperFence()` in `AssistantView` strips a whole-response
+fence before parsing (conservatively — a tagged ` ```python ` block, or a code block followed by
+prose, is left alone, and an unterminated fence still unwraps so streaming renders correctly);
+`pre` now uses `white-space: pre-wrap` since horizontal scrolling is unusable in a narrow overlay;
+and `GLOBAL_OUTPUT_RULES` in `prompts.js` tells every profile not to fence its whole response.
 
 ## 8. Where to start for common tasks
 
