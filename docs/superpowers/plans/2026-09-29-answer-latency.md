@@ -37,7 +37,7 @@
 |---|---|
 | `scripts/lib/transportLog.js` (create) | Tolerant parser for transport logs, plus extraction of the input/model-start timeline. Pure. |
 | `scripts/replay-turns.js` (create) | CLI: replay logs against trigger policies and print split rate and latency. Pure `simulate`/`summarize` exported. |
-| `scripts/live-turn-test.js` (create) | CLI: synthesize interviewer audio with controlled pauses and stream it to Gemini Live; report when Gemini detects end of turn. |
+| `scripts/measure-live-turns.js` (create) | CLI: synthesize interviewer audio with controlled pauses and stream it to Gemini Live; report when Gemini detects end of turn. |
 | `src/utils/answerThread.js` (create) | Pure follow-up logic: `isFollowUp`, `buildContinuationMessage`, `composeThreadText`, `FOLLOW_UP_GRACE_MS`. |
 | `src/utils/gemini.js` (modify) | Trigger on Gemini end-of-turn; stop dropping same-turn speech; VAD config; follow-up threading; connection warm-up. |
 | `src/storage.js` (modify) | New config default `geminiSilenceDurationMs` (only if Task 2 shows a non-default value wins). |
@@ -288,7 +288,7 @@ module.exports = { simulate, summarize };
 ### Task 2: Scripted live test against real Gemini Live
 
 **Files:**
-- Create: `scripts/live-turn-test.js`
+- Create: `scripts/measure-live-turns.js`
 
 **Interfaces:**
 - Consumes: `getCredentials()`, `getConfig()` from `src/storage.js`; `getSystemPrompt` from `src/utils/prompts.js`.
@@ -300,13 +300,13 @@ This measures what the replay can't: **exact** speech-end time, because we gener
   `node -e "const {getCredentials}=require('./src/storage');fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key='+getCredentials().apiKey).then(r=>r.json()).then(j=>console.log(j.models.filter(m=>/tts/i.test(m.name)).map(m=>m.name)))"`
   Use the newest name in the output as `TTS_MODEL`.
 
-- [ ] **Step 2: Write `scripts/live-turn-test.js`**
+- [ ] **Step 2: Write `scripts/measure-live-turns.js`**
 
 ```js
 #!/usr/bin/env node
 // Streams synthesized interviewer speech with controlled mid-question pauses into Gemini Live,
 // configured like the app, and reports when Gemini's VAD decides the turn ended. Usage:
-//   node scripts/live-turn-test.js [--tts-model NAME] [--pauses 500,1000,1500,2000] [--silence default,300,800] [--reps 3]
+//   node scripts/measure-live-turns.js [--tts-model NAME] [--pauses 500,1000,1500,2000] [--silence default,300,800] [--reps 3]
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -454,12 +454,12 @@ async function main() {
 main().catch(e => { console.error(e); process.exit(1); });
 ```
 
-- [ ] **Step 3: Smoke-run one trial.** Run: `node scripts/live-turn-test.js --tts-model <TTS_MODEL> --pauses 1000 --silence default --reps 1`. Expected: one JSON line with a non-empty `transcript` containing "Kubernetes". If the transcript is empty, check the audio format (`ffplay -f s16le -ar 24000 -ac 1 <outFile>`) before going on.
-- [ ] **Step 4: Full run.** Run: `node scripts/live-turn-test.js --tts-model <TTS_MODEL> --reps 3` and paste the summary table into "Results".
+- [ ] **Step 3: Smoke-run one trial.** Run: `node scripts/measure-live-turns.js --tts-model <TTS_MODEL> --pauses 1000 --silence default --reps 1`. Expected: one JSON line with a non-empty `transcript` containing "Kubernetes". If the transcript is empty, check the audio format (`ffplay -f s16le -ar 24000 -ac 1 <outFile>`) before going on.
+- [ ] **Step 4: Full run.** Run: `node scripts/measure-live-turns.js --tts-model <TTS_MODEL> --reps 3` and paste the summary table into "Results".
 - [ ] **Step 5: Decide the values** using this rule, and record the decision in "Results":
   - `silenceDurationMs` = the setting with the lowest median end-of-turn delay whose split count at pause 1000ms is ≤ 1/3 **and** whose split rate across all pauses is no worse than `default`. Keep `default` (no `realtimeInputConfig`) if nothing beats it.
   - Fallback `TRANSCRIPTION_SETTLE_MS` = the smallest value in {600, 900, 1200, 1500} whose Task 1 policy "gemini EOT + N fallback" has split rate ≤ 10%. If none, keep 1500.
-- [ ] **Step 6: Commit** `git add scripts/live-turn-test.js docs/superpowers/plans && git commit -m "test(latency): scripted Gemini Live end-of-turn test"`
+- [ ] **Step 6: Commit** `git add scripts/measure-live-turns.js docs/superpowers/plans && git commit -m "test(latency): scripted Gemini Live end-of-turn test"`
 
 ---
 
@@ -487,7 +487,7 @@ let messageBuffer = '';
 // activity detection: its first model output after the interviewer stops arrives 550-1050ms after
 // the last fragment (measured across 5 sessions). The timer is the fallback for turns Gemini
 // chooses not to answer (proactiveAudio). Value picked by scripts/replay-turns.js and
-// scripts/live-turn-test.js; see docs/superpowers/plans/2026-09-29-answer-latency.md.
+// scripts/measure-live-turns.js; see docs/superpowers/plans/2026-09-29-answer-latency.md.
 const TRANSCRIPTION_SETTLE_MS = /* value from Task 2 Step 5 */ 1500;
 let transcriptionSettleTimer = null;
 let awaitingEndOfTurn = false;
