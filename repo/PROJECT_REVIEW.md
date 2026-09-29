@@ -79,14 +79,20 @@ precedence is OpenRouter, then Groq, then Gemini Live itself if neither key is s
 
 1. Audio chunks (24 kHz mono PCM, 100 ms) → `sendRealtimeInput`.
 2. `serverContent.inputTranscription` accumulates into `currentTranscription`.
-3. Each inputTranscription message (re)arms a 1500 ms settle timer
-   (`scheduleAnswerForSettledTranscription`). When it expires,
-   `sendFinalTranscriptionToAnswerProvider()` fires once per turn (guard
-   `groqRequestStartedForTurn`, reset on `turnComplete`). If a turn ends while the timer is
-   still pending, `flushPendingTranscription()` sends immediately rather than cancelling —
-   see finding #7.
+3. The answer fires on Gemini's end-of-turn signal. With a native-audio model, that is Gemini's
+   first `modelTurn`/`outputTranscription` after the input (median 735 ms after the last fragment).
+   With a transcription model (`gemini-3.5-transcribe-live`), it is the `generationComplete` that
+   follows each whole utterance. Each inputTranscription message also (re)arms a 1500 ms settle
+   timer (`scheduleAnswerForSettledTranscription`) as a fallback for turns Gemini never answers.
+   `sendFinalTranscriptionToAnswerProvider()` **consumes** `currentTranscription`, so each send is
+   one settled chunk of speech and later speech in the same Gemini turn is sent too. Transcriptions
+   that are only noise tags (`<noise>`) are skipped.
 4. The resolved provider streams back via `sendTextToProvider`; tokens go to the renderer as
-   `new-response` / `update-response`.
+   `new-response` / `update-response`. Voice speech that arrives while an answer is streaming, or
+   within 5 s after it finishes, is a **follow-up** (`src/utils/answerThread.js`). It is sent as
+   "the interviewer continued their previous question (…) with: … answer only the new part", and its
+   answer is appended below the current one on the same card, after a `---` divider. Typed
+   questions always open a new card.
 5. If **neither** provider key is set, `getAnswerProvider()` returns `null` and Gemini's own
    `outputTranscription` is used as the answer instead.
 
@@ -212,10 +218,16 @@ Plain JSON under the OS config dir (`~/.config/cheating-daddy-config` on Linux):
       produced no `openrouter.text.request` at all (3 turns, 2 answers). Short questions lose this race
       because Gemini finishes generating fast on short input. Fixed by `flushPendingTranscription()`,
       which sends the pending transcription instead of discarding it.
-8. **Gemini Live still generates a full spoken answer even when Groq is answering.** With a Groq key set,
-   `outputTranscription` is simply not forwarded to the UI — the tokens are still generated and billed.
-   A previous "relay mode" experiment (making Gemini a silent transcriber) was reverted because answer
-   quality dropped; worth revisiting with a narrower prompt rather than a one-character relay.
+8. ~~**Gemini Live still generates a full spoken answer even when Groq is answering.**~~
+   **Resolved 2026-09-29 by configuration:** set `geminiLiveModel` to `gemini-3.5-transcribe-live`.
+   `liveConfig.js` then asks for TEXT and drops the reply-only options. Without an answer provider it
+   falls back to the default native-audio model. This was more than wasted tokens: the spoken reply
+   (about 14 s long) is what degraded the interviewer's next words. In live tests, a continuation
+   spoken over Gemini's reply was transcribed 2–4 s late, or not at all in 7 of 22 trials. In the real
+   app, a question asked while the previous reply was still running came through as "Kubera." and
+   "is Cooper Nathan.". With the transcription model, every utterance was exact and complete. The
+   earlier "relay mode" quality drop doesn't apply: that experiment had Gemini answer, whereas here the
+   answer provider still answers.
 9. **`getStoredSetting` executes string-interpolated JS in the renderer** (`gemini.js:170-190`) to read
    `localStorage`, even though a full IPC storage layer exists and `googleSearchEnabled` already lives
    in `preferences.json`. Two sources of truth, and an unnecessary `executeJavaScript`.
@@ -330,6 +342,29 @@ prose, is left alone, and an unterminated fence still unwraps so streaming rende
 `pre` now uses `white-space: pre-wrap` since horizontal scrolling is unusable in a narrow overlay;
 and `GLOBAL_OUTPUT_RULES` in `prompts.js` tells every profile not to fence its whole response.
 
+### Answer latency (2026-09-29)
+
+Branch `feat/answer-latency`, plan and all measurements in
+`docs/superpowers/plans/2026-09-29-answer-latency.md`. The tools are reusable:
+`node scripts/replay-turns.js` replays recorded sessions against trigger policies, and
+`node scripts/measure-live-turns.js` streams synthesized speech with controlled pauses into Gemini
+Live (`--live-model`, `--pauses`, `--silence`; TTS clips are cached because the free tier allows 10
+TTS requests per model per day).
+
+- **Where the time went (gpt-6-luna, before):** 1500 ms settle, 1.0–2.3 s to first token, 1.5–2.2 s
+  streaming. About 5.1 s from the last fragment, plus about 1 s of capture-plus-transcription lag in
+  the real app.
+- **End-of-turn trigger:** replaces the fixed 1500 ms wait in the common case. The replay across 54
+  logged questions showed the same split count under every policy, because the real mid-question
+  pauses were 1.6–2.9 s, beyond any window worth waiting. Splits are threaded as follow-ups instead.
+- **`silenceDurationMs`** (Gemini VAD): 300 / default / 1200 made no measurable difference, and 2000
+  only slowed end-of-turn. Left unset.
+- **Connection warm-up:** the first fragment of each question pre-opens the OpenRouter socket
+  (`warmAnswerProviderConnection`). Measured 408 ms cold vs 132 ms warm.
+- **End to end in the real app** (speakers → loopback capture, transcribe-live, gpt-6-luna): speech
+  end → request 1.1–1.2 s, first text 2.4–3.0 s, finished 3.9–5.0 s. Follow-ups were threaded under
+  the first answer and answered only the new part.
+
 ## 8. Where to start for common tasks
 
 | Task                                                | File                                                                        |
@@ -341,3 +376,5 @@ and `GLOBAL_OUTPUT_RULES` in `prompts.js` tells every profile not to fence its w
 | Window behaviour, shortcuts, stealth                | `src/utils/window.js`                                                       |
 | Offline pipeline                                    | `src/utils/localai.js`, `src/utils/native-ai-runtime.js`                    |
 | Debug a live session                                | `<config>/logs/<sessionId>.json` via `transportLogger.js`                   |
+| Measure answer latency / split questions            | `scripts/replay-turns.js`, `scripts/measure-live-turns.js`                  |
+| Change follow-up threading                          | `src/utils/answerThread.js`                                                 |

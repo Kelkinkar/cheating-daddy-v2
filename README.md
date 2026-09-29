@@ -64,6 +64,21 @@ To change any of this, edit both the rules **and** the few-shot examples in that
 Longer answers take proportionally longer to finish streaming, which matters in a live
 conversation. See §7 of `repo/PROJECT_REVIEW.md` for the token caps and their caveats.
 
+## Answer Speed and Follow-ups
+
+When OpenRouter or Groq is answering, set the Live model on the Home screen to
+`gemini-3.5-transcribe-live`. Gemini then only transcribes and never generates a spoken reply of its
+own, and that reply was what garbled or delayed the interviewer's next words. The answer is sent as
+soon as Gemini marks the end of an utterance, with a 1.5 s fallback timer.
+
+If the interviewer pauses mid-question and then continues ("What is Kubernetes … and how do you
+handle pods that keep failing?"), the continuation is answered **below** the first answer on the
+same card, after a divider, and covers only the new part. Speech counts as a follow-up if it arrives
+while the answer is streaming or within 5 s after it finishes.
+
+To measure latency on your own sessions, run `node scripts/replay-turns.js`. It reads the transport
+logs in the config directory.
+
 ## Keyboard Shortcuts
 
 - **Window Movement**: `Ctrl/Cmd + Arrow Keys` - Move window
