@@ -16,6 +16,7 @@ const {
 const { PROVIDERS, buildChatRequest, streamChatCompletion, stripThinkingTags } = require('./openaiCompatible');
 const { connectCloud, sendCloudAudio, sendCloudText, sendCloudImage, closeCloud, isCloudActive, setOnTurnComplete } = require('./cloud');
 const { startTransportLog, logTransportEvent, closeTransportLog } = require('./transportLogger');
+const { createAnswerThread, isFollowUp, buildContinuationMessage, composeThreadText, isNonSpeech } = require('./answerThread');
 
 // Lazy-loaded to avoid circular dependency (localai.js imports from gemini.js)
 let _localai = null;
@@ -31,6 +32,9 @@ let currentProviderMode = 'byok';
 // keyed on the name `groqConversationHistory` for historical reasons; also shared with an
 // unreachable legacy code path further down. Do not rename.
 let groqConversationHistory = [];
+
+// The on-screen card that voice follow-ups are appended to; see answerThread.js.
+let answerThread = createAnswerThread();
 
 // Conversation tracking variables
 let currentSessionId = null;
@@ -58,16 +62,18 @@ module.exports.formatSpeakerResults = formatSpeakerResults;
 // Audio capture variables
 let systemAudioProc = null;
 let messageBuffer = '';
-let groqRequestStartedForTurn = false;
 
-// Gemini Live streams input transcription in fragments ~120ms apart. Answering on the first
-// fragment sends a 2-4 character question ("What"), so wait for the stream to settle. Measured:
-// max inter-fragment gap 244ms, full question 0.67s. Raised from 800ms to 1500ms to also absorb
-// mid-sentence pauses, so a speaker who hesitates is still treated as one question. The cost is
-// latency before the answer starts; flushPendingTranscription keeps a turn that ends inside the
-// window from being dropped, which is what makes the longer wait safe.
+// Gemini Live streams input transcription in fragments ~120ms apart, so answering on the first
+// fragment sends a 2-4 character question ("What"). The primary trigger is Gemini's own voice
+// activity detection: its first model output after the interviewer stops arrives 550-1050ms after
+// the last fragment (median 735ms across 54 logged questions). The timer is the fallback for
+// turns Gemini chooses not to answer (proactiveAudio). Mid-question pauses in real sessions were
+// 1.6-2.9s, longer than any window worth waiting, so those are threaded as follow-ups
+// (answerThread.js) rather than absorbed here. Measured with scripts/replay-turns.js and
+// scripts/measure-live-turns.js; see docs/superpowers/plans/2026-09-29-answer-latency.md.
 const TRANSCRIPTION_SETTLE_MS = 1500;
 let transcriptionSettleTimer = null;
+let awaitingEndOfTurn = false;
 
 function emptyResponseMessage(provider, finishReason) {
     if (finishReason === 'length') {
@@ -108,11 +114,12 @@ function initializeNewSession(profile = null, customPrompt = null) {
     currentSessionId = Date.now().toString();
     startTransportLog(currentSessionId);
     currentTranscription = '';
-    groqRequestStartedForTurn = false;
+    awaitingEndOfTurn = false;
     clearTranscriptionSettleTimer();
     conversationHistory = [];
     screenAnalysisHistory = [];
     groqConversationHistory = [];
+    answerThread = createAnswerThread();
     currentProfile = profile;
     currentCustomPrompt = customPrompt;
     console.log('New conversation session started:', currentSessionId, 'profile:', profile);
@@ -267,7 +274,7 @@ function scheduleAnswerForSettledTranscription() {
 // A turn can end inside the settle window: Gemini finishes generating fast on short input, so
 // its generationComplete/turnComplete can arrive before the settle timer fires. Cancelling the
 // timer there dropped the question with no answer and no error, so flush it instead. Safe to
-// call twice per turn - sendFinalTranscriptionToAnswerProvider guards on groqRequestStartedForTurn.
+// call twice - the second call sees an empty transcription.
 function flushPendingTranscription() {
     if (!transcriptionSettleTimer) {
         return;
@@ -277,19 +284,23 @@ function flushPendingTranscription() {
     sendFinalTranscriptionToAnswerProvider();
 }
 
+// Takes the settled speech and clears it, so each send is one chunk of speech. Speech that arrives
+// after a send, even inside the same Gemini turn, becomes its own send rather than being dropped:
+// the old per-turn latch held until turnComplete, 20-30s later, and silently swallowed follow-ups.
 function sendFinalTranscriptionToAnswerProvider() {
     const provider = getAnswerProvider();
-    if (!provider || groqRequestStartedForTurn) {
+    if (!provider) {
         return;
     }
 
     const transcription = currentTranscription.trim();
-    if (transcription === '') {
+    currentTranscription = '';
+    awaitingEndOfTurn = false;
+    if (transcription === '' || isNonSpeech(transcription)) {
         return;
     }
 
-    groqRequestStartedForTurn = true;
-    sendTextToProvider(provider, transcription);
+    sendTextToProvider(provider, transcription, { threadable: true });
 }
 
 function trimConversationHistoryForGemma(history, maxChars = 42000) {
@@ -343,7 +354,9 @@ async function streamProviderAnswer({ provider, apiKey, model, messages, thinkin
     });
 }
 
-async function sendTextToProvider(provider, transcription) {
+// threadable: voice input may continue the current card as a follow-up. Typed questions are
+// deliberate, so they always open a new card.
+async function sendTextToProvider(provider, transcription, { threadable = false } = {}) {
     const apiKey = PROVIDER_KEY_GETTERS[provider.id]();
     if (!apiKey) {
         console.log(`No ${provider.label} API key configured, skipping response`);
@@ -358,15 +371,35 @@ async function sendTextToProvider(provider, transcription) {
     const config = getConfig();
     const modelToUse = config[provider.textModelKey];
 
+    const followUp = threadable && isFollowUp(answerThread, Date.now());
+    if (!followUp) {
+        answerThread = createAnswerThread();
+    }
+    const thread = answerThread;
+    const segmentIndex = thread.segments.length;
+    const modelInput = followUp ? buildContinuationMessage(thread.questions, transcription.trim()) : transcription.trim();
+    thread.questions.push(transcription.trim());
+    thread.segments.push('');
+
+    // The first answer opens a card; follow-ups rewrite that card with every segment so far, so an
+    // answer still streaming above keeps updating in place.
+    const showSegment = (text, isFirst) => {
+        thread.segments[segmentIndex] = text;
+        if (thread !== answerThread) return; // a newer card owns the screen
+        const opensCard = segmentIndex === 0 && isFirst;
+        sendToRenderer(opensCard ? 'new-response' : 'update-response', composeThreadText(thread.segments));
+    };
+
     console.log(`Sending to ${provider.label} (${modelToUse}):`, transcription.substring(0, 100) + '...');
     logTransportEvent(`${provider.id}.text.request`, {
         model: modelToUse,
         transcription,
+        followUp,
     });
 
     groqConversationHistory.push({
         role: 'user',
-        content: transcription.trim(),
+        content: modelInput,
     });
 
     if (groqConversationHistory.length > 20) {
@@ -375,6 +408,7 @@ async function sendTextToProvider(provider, transcription) {
 
     const systemPrompt = currentSystemPrompt || 'You are a helpful assistant.';
 
+    thread.streaming++;
     try {
         const attemptOptions = {
             provider,
@@ -382,7 +416,7 @@ async function sendTextToProvider(provider, transcription) {
             model: modelToUse,
             messages: [{ role: 'system', content: systemPrompt }, ...groqConversationHistory],
             thinkingDisabled: config.disableGroqThinking,
-            onDisplayText: (displayText, isFirst) => sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText),
+            onDisplayText: showSegment,
         };
 
         let attempt = await streamProviderAnswer(attemptOptions);
@@ -435,7 +469,7 @@ async function sendTextToProvider(provider, transcription) {
                 fullText,
                 finishReason,
             });
-            sendToRenderer('new-response', emptyResponseMessage(provider, finishReason));
+            showSegment(emptyResponseMessage(provider, finishReason), true);
             sendToRenderer('update-status', `${provider.label} returned an empty response`);
             return;
         }
@@ -453,6 +487,9 @@ async function sendTextToProvider(provider, transcription) {
             stack: error.stack,
         });
         sendToRenderer('update-status', `${provider.label} error: ` + error.message);
+    } finally {
+        thread.streaming--;
+        thread.finishedAt = Date.now();
     }
 }
 
@@ -686,7 +723,13 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     }
 
                     if (message.serverContent?.inputTranscription) {
+                        awaitingEndOfTurn = true;
                         scheduleAnswerForSettledTranscription();
+                    } else if (awaitingEndOfTurn && (message.serverContent?.modelTurn || message.serverContent?.outputTranscription)) {
+                        // Gemini's first output after the interviewer stops is its end-of-turn decision,
+                        // ~765ms sooner than the settle timer at the median.
+                        awaitingEndOfTurn = false;
+                        flushPendingTranscription();
                     }
 
                     if (message.serverContent?.outputTranscription?.text && !getAnswerProvider()) {
@@ -711,7 +754,6 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                         flushPendingTranscription();
                         currentTranscription = '';
                         messageBuffer = '';
-                        groqRequestStartedForTurn = false;
                         sendToRenderer('update-status', 'Listening...');
                     }
                 },
@@ -1244,7 +1286,6 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
 
             const textProvider = getAnswerProvider();
             if (textProvider) {
-                groqRequestStartedForTurn = true;
                 sendTextToProvider(textProvider, text.trim());
             }
 
