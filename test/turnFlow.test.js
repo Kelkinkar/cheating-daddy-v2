@@ -2,95 +2,15 @@
 // storage and fetch stubbed, and checks what reaches the answer provider and the renderer.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Module = require('node:module');
-const os = require('node:os');
-const path = require('node:path');
-const fs = require('node:fs');
+const { loadGeminiWithStubs } = require('./helpers/geminiHarness');
 
-const storagePath = path.resolve(__dirname, '../src/storage.js');
-const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'turnflow-'));
-
-const rendered = [];
-let liveCallbacks = null;
-
-const stubs = {
-    electron: {
-        BrowserWindow: {
-            getAllWindows: () => [{ webContents: { send: (channel, data) => rendered.push({ channel, data }), executeJavaScript: async () => null } }],
-        },
-        ipcMain: { handle() {}, on() {} },
-    },
-    '@google/genai': {
-        GoogleGenAI: class {
-            constructor() {
-                this.live = {
-                    connect: async ({ callbacks }) => {
-                        liveCallbacks = callbacks;
-                        return { sendRealtimeInput: async () => {}, close() {} };
-                    },
-                };
-            }
-        },
-        Modality: { AUDIO: 'AUDIO', TEXT: 'TEXT' },
-    },
-    [storagePath]: {
-        getConfigDir: () => configDir,
-        getCredentials: () => ({ openrouterApiKey: 'test-key', groqApiKey: '' }),
-        getOpenRouterApiKey: () => 'test-key',
-        getGroqApiKey: () => '',
-        getApiKey: () => 'gemini-key',
-        getConfig: () => ({ openrouterModel: 'openai/gpt-6-luna', geminiLiveModel: 'live-model', disableGroqThinking: false }),
-        getAvailableModel: () => 'x',
-        incrementLimitCount() {},
-        incrementCharUsage() {},
-    },
-};
-
-const originalLoad = Module._load;
-Module._load = function (request, parent, isMain) {
-    if (stubs[request]) return stubs[request];
-    try {
-        const resolved = Module._resolveFilename(request, parent, isMain);
-        if (stubs[resolved]) return stubs[resolved];
-    } catch {
-        // fall through
-    }
-    return originalLoad.apply(this, arguments);
-};
-
-// Each provider request gets a stream the test finishes explicitly, so "still streaming" is controllable.
-const requests = [];
-const warmups = [];
-global.fetch = async (url, options) => {
-    if (!url.endsWith('/chat/completions')) {
-        warmups.push(url);
-        return new Response('{}', { status: 200 });
-    }
-    let controller;
-    const body = new ReadableStream({ start: c => (controller = c) });
-    const request = {
-        url,
-        body: JSON.parse(options.body),
-        said: false,
-        say(text) {
-            this.said = true;
-            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`));
-        },
-        finish() {
-            if (!this.said) this.say('ok');
-            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`));
-            controller.close();
-        },
-    };
-    requests.push(request);
-    return new Response(body, { status: 200 });
-};
-
-const gemini = require('../src/utils/gemini');
+const harness = loadGeminiWithStubs();
+const { gemini, rendered, requests, warmups } = harness;
+const live = () => harness.sessions[harness.sessions.length - 1].callbacks;
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 20));
-const input = text => liveCallbacks.onmessage({ serverContent: { inputTranscription: { text } } });
-const modelStarts = () => liveCallbacks.onmessage({ serverContent: { modelTurn: { parts: [] } } });
+const input = text => live().onmessage({ serverContent: { inputTranscription: { text } } });
+const modelStarts = () => live().onmessage({ serverContent: { modelTurn: { parts: [] } } });
 const lastUserMessage = request => request.body.messages.filter(m => m.role === 'user').pop().content;
 
 let realNow = Date.now;
@@ -99,12 +19,12 @@ let clockOffset = 0;
 test.before(async () => {
     Date.now = () => realNow() + clockOffset;
     await gemini.initializeGeminiSession('gemini-key', '', 'interview', 'en-US');
-    assert.ok(liveCallbacks, 'live session connected');
+    assert.equal(harness.sessions.length, 1, 'live session connected');
 });
 
 test.after(() => {
     Date.now = realNow;
-    Module._load = originalLoad;
+    harness.restore();
 });
 
 test.beforeEach(() => {
@@ -217,7 +137,7 @@ test('the first fragment of a question warms the provider connection once', asyn
 
 test('a transcription-model utterance is sent on its generationComplete', async () => {
     input('What is Kubernetes?');
-    liveCallbacks.onmessage({ serverContent: { generationComplete: true } });
+    live().onmessage({ serverContent: { generationComplete: true } });
     await tick();
     assert.equal(requests.length, 1);
     assert.equal(lastUserMessage(requests[0]), 'What is Kubernetes?');

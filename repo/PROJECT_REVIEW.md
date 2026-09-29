@@ -108,6 +108,17 @@ so a dead key is visible rather than silently degrading answers mid-interview.
 20 turns as a synthetic text message (`buildContextMessage`). On exhaustion it emits `reconnect-failed`,
 which the renderer renders as a response card.
 
+**Planned rollover (2026-09-29).** Gemini Live ends a session after about 10 minutes and sends `goAway`
+first (observed: `timeLeft: 50s`, at 9.0 min in two separate sessions). The app used to wait for the
+server to abort the connection, then wait `RECONNECT_DELAY`, which left a ~2.4 s gap in which the
+interviewer was not heard. `handOffLiveSession()` now opens the next session as soon as `goAway`
+arrives, points `geminiSessionRef` at it, restores context, and closes the old session after
+`HANDOFF_DRAIN_MS` (3 s), so transcripts already in flight still arrive. Each connection carries a
+`liveSession` record, and a retired session's `onclose` is ignored, so it never triggers a reconnect.
+If the handoff fails, nothing changes and the server's close takes the normal reconnect path. In a
+real 11.5-minute session with questions asked back-to-back across the switch, the next session was
+up about 0.6 s after `goAway`, and all 40 utterances were transcribed and answered.
+
 ### Renderer ↔ main
 
 Main→renderer channels: `update-status`, `new-response`, `update-response`, `session-initializing`,

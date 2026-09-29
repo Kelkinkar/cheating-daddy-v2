@@ -93,6 +93,13 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_DELAY = 2000;
 
+// Gemini Live ends a session after ~10 minutes, warning first with goAway (observed: timeLeft 50s).
+// Waiting for the server to abort the connection and then reconnecting left a ~2.4s gap in which
+// the interviewer was not heard. Instead the next session is opened as soon as goAway arrives and
+// audio moves to it; the retired session stays open this long, receiving no audio, so transcripts
+// already in flight still arrive.
+const HANDOFF_DRAIN_MS = 3000;
+
 function sendToRenderer(channel, data) {
     const windows = BrowserWindow.getAllWindows();
     if (windows.length > 0) {
@@ -727,6 +734,9 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         liveModel = NATIVE_AUDIO_FALLBACK_MODEL;
     }
 
+    // Per-connection state. Callbacks of a retired session must not drive reconnection.
+    const liveSession = { session: null, retired: false, handingOff: false };
+
     try {
         const session = await client.live.connect({
             model: liveModel,
@@ -738,6 +748,10 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                 onmessage: function (message) {
                     console.log('----------------', message);
                     logTransportEvent('gemini.live.message', message);
+
+                    if (message.goAway) {
+                        handOffLiveSession(liveSession);
+                    }
 
                     if (message.serverContent?.inputTranscription && currentTranscription === '') {
                         warmAnswerProviderConnection();
@@ -799,7 +813,13 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     console.log('Session closed:', e.reason);
                     logTransportEvent('gemini.live.closed', {
                         reason: e.reason,
+                        retired: liveSession.retired,
                     });
+
+                    // A session replaced by a handoff closing is expected, not a failure.
+                    if (liveSession.retired) {
+                        return;
+                    }
 
                     // Don't reconnect if user intentionally closed
                     if (isUserClosing) {
@@ -821,6 +841,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
             config: buildLiveConfig({ model: liveModel, tools: enabledTools, systemPrompt, language }),
         });
 
+        liveSession.session = session;
         isInitializingSession = false;
         if (!isReconnect) {
             sendToRenderer('session-initializing', false);
@@ -834,6 +855,57 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         }
         return null;
     }
+}
+
+async function restoreConversationContext(session) {
+    const contextMessage = buildContextMessage();
+    if (!contextMessage) return;
+    try {
+        console.log('Restoring conversation context...');
+        await session.sendRealtimeInput({ text: contextMessage });
+    } catch (contextError) {
+        // Continue without context - better than failing
+        console.error('Failed to restore context:', contextError);
+    }
+}
+
+// Replaces a session that received goAway. If opening the next session fails, nothing changes:
+// the server closes the old one at its deadline and onclose takes the normal reconnect path.
+async function handOffLiveSession(liveSession) {
+    if (liveSession.handingOff || liveSession.retired || !sessionParams) return;
+    liveSession.handingOff = true;
+    logTransportEvent('gemini.live.handoff_started', {});
+
+    let next = null;
+    try {
+        next = await initializeGeminiSession(sessionParams.apiKey, sessionParams.customPrompt, sessionParams.profile, sessionParams.language, true);
+    } catch (error) {
+        console.error('Live session handoff failed:', error);
+    }
+
+    // The user may have stopped the session while the next one was connecting.
+    if (next && (!sessionParams || !global.geminiSessionRef)) {
+        next.close();
+        next = null;
+    }
+    if (!next) {
+        logTransportEvent('gemini.live.handoff_failed', {});
+        return;
+    }
+
+    liveSession.retired = true;
+    global.geminiSessionRef.current = next;
+    await restoreConversationContext(next);
+    logTransportEvent('gemini.live.handoff_completed', {});
+    console.log('Live session handed off after goAway');
+
+    setTimeout(() => {
+        try {
+            liveSession.session.close();
+        } catch (error) {
+            console.error('Failed to close retired live session:', error);
+        }
+    }, HANDOFF_DRAIN_MS);
 }
 
 async function attemptReconnect() {
@@ -861,18 +933,7 @@ async function attemptReconnect() {
 
         if (session && global.geminiSessionRef) {
             global.geminiSessionRef.current = session;
-
-            // Restore context from conversation history via text message
-            const contextMessage = buildContextMessage();
-            if (contextMessage) {
-                try {
-                    console.log('Restoring conversation context...');
-                    await session.sendRealtimeInput({ text: contextMessage });
-                } catch (contextError) {
-                    console.error('Failed to restore context:', contextError);
-                    // Continue without context - better than failing
-                }
-            }
+            await restoreConversationContext(session);
 
             // Don't reset reconnectAttempts here - let it reset on next fresh session
             sendToRenderer('update-status', 'Reconnected! Listening...');
@@ -1411,6 +1472,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
 }
 
 module.exports = {
+    HANDOFF_DRAIN_MS,
     initializeGeminiSession,
     getEnabledTools,
     getStoredSetting,
