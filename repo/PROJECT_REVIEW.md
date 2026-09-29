@@ -219,7 +219,7 @@ Plain JSON under the OS config dir (`~/.config/cheating-daddy-config` on Linux):
       because Gemini finishes generating fast on short input. Fixed by `flushPendingTranscription()`,
       which sends the pending transcription instead of discarding it.
 8. ~~**Gemini Live still generates a full spoken answer even when Groq is answering.**~~
-   **Resolved 2026-09-29 by configuration:** set `geminiLiveModel` to `gemini-3.5-transcribe-live`.
+   **Resolved 2026-09-29:** `geminiLiveModel` now defaults to `gemini-3.5-transcribe-live`.
    `liveConfig.js` then asks for TEXT and drops the reply-only options. Without an answer provider it
    falls back to the default native-audio model. This was more than wasted tokens: the spoken reply
    (about 14 s long) is what degraded the interviewer's next words. In live tests, a continuation

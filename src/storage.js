@@ -9,7 +9,8 @@ const DEFAULT_CONFIG = {
     configVersion: CONFIG_VERSION,
     onboarded: false,
     layout: 'normal',
-    geminiLiveModel: 'gemini-3.1-flash-live-preview',
+    // Transcription-only: the answer provider answers. Without one, gemini.js falls back to a native-audio model.
+    geminiLiveModel: 'gemini-3.5-transcribe-live',
     groqModel: 'qwen/qwen3.6-27b',
     groqImageModel: 'qwen/qwen3.6-27b',
     openrouterModel: 'qwen/qwen3.8-27b',

@@ -27,3 +27,14 @@ test('transcription config asks for text and drops reply-only options', () => {
     }
     assert.equal(config.systemInstruction.parts[0].text, 'be brief');
 });
+
+test('a fresh install defaults to the transcription model', () => {
+    // node --test runs each file in its own process, so pointing HOME at an empty directory only
+    // affects this file: getConfig() then returns DEFAULT_CONFIG.
+    const fs = require('node:fs');
+    const os = require('node:os');
+    const path = require('node:path');
+    process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'fresh-home-'));
+    const { getConfig } = require('../src/storage');
+    assert.equal(getConfig().geminiLiveModel, 'gemini-3.5-transcribe-live');
+});

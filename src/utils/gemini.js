@@ -84,7 +84,7 @@ function emptyResponseMessage(provider, finishReason) {
     return `${provider.label} returned an empty response twice in a row (finish reason: ${finishReason || 'unknown'}). This is usually a flaky upstream provider rather than a bad request. Ask again, or try a different model in Home → AI responses.`;
 }
 
-const DEFAULT_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
+const NATIVE_AUDIO_FALLBACK_MODEL = 'gemini-3.1-flash-live-preview';
 
 // Reconnection variables
 let isUserClosing = false;
@@ -723,8 +723,8 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     // default native-audio model rather than a session that stays silent.
     let liveModel = getConfig().geminiLiveModel;
     if (isTranscriptionModel(liveModel) && !getAnswerProvider()) {
-        console.warn(`${liveModel} only transcribes and no answer provider is set; using ${DEFAULT_LIVE_MODEL}`);
-        liveModel = DEFAULT_LIVE_MODEL;
+        console.warn(`${liveModel} only transcribes and no answer provider is set; using ${NATIVE_AUDIO_FALLBACK_MODEL}`);
+        liveModel = NATIVE_AUDIO_FALLBACK_MODEL;
     }
 
     try {

@@ -66,9 +66,10 @@ conversation. See §7 of `repo/PROJECT_REVIEW.md` for the token caps and their c
 
 ## Answer Speed and Follow-ups
 
-When OpenRouter or Groq is answering, set the Live model on the Home screen to
-`gemini-3.5-transcribe-live`. Gemini then only transcribes and never generates a spoken reply of its
-own, and that reply was what garbled or delayed the interviewer's next words. The answer is sent as
+The default Live model is `gemini-3.5-transcribe-live`: Gemini only transcribes and OpenRouter or
+Groq answers. It never generates a spoken reply of its own, and that reply was what garbled or
+delayed the interviewer's next words. If no answer provider key is set, the app falls back to a
+native-audio Live model so Gemini can answer itself. The answer is sent as
 soon as Gemini marks the end of an utterance, with a 1.5 s fallback timer.
 
 If the interviewer pauses mid-question and then continues ("What is Kubernetes … and how do you
