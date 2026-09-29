@@ -1,5 +1,33 @@
 import { html, css, LitElement } from '../../assets/lit-core-2.7.4.min.js';
 
+// marked runs without sanitization and the result is assigned to innerHTML in a renderer that has
+// nodeIntegration, so markup in a response executes with full Node access. Model output is untrusted:
+// search grounding and screenshot transcription both carry outside text into it. Allowlist the tags
+// and attributes marked actually emits, and drop everything else.
+const ALLOWED_TAGS = new Set([
+    'P', 'BR', 'HR', 'STRONG', 'B', 'EM', 'I', 'DEL', 'S', 'CODE', 'PRE', 'BLOCKQUOTE',
+    'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'A', 'IMG', 'SPAN',
+    'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD',
+]);
+// Removed with their subtree. Any other non-allowed element is unwrapped so its text survives.
+const STRIPPED_TAGS = new Set([
+    'SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'BASE',
+    'FORM', 'INPUT', 'BUTTON', 'TEXTAREA', 'SELECT', 'SVG', 'MATH', 'TEMPLATE', 'NOSCRIPT',
+]);
+// Everything not listed here is dropped, which is what neutralises on* handlers.
+const ALLOWED_ATTRIBUTES = {
+    A: new Set(['href', 'title']),
+    IMG: new Set(['src', 'alt', 'title']),
+    CODE: new Set(['class']),
+    PRE: new Set(['class']),
+    TH: new Set(['align']),
+    TD: new Set(['align']),
+};
+const SAFE_HREF = /^(https?:|mailto:)/i;
+const SAFE_SRC = /^https?:/i;
+const SAFE_CLASS = /^language-[\w-]+$/;
+const SAFE_ALIGN = /^(left|right|center)$/i;
+
 // Fence languages that indicate a model wrapped prose rather than emitted real code.
 const WRAPPER_FENCE_LANGUAGES = new Set(['', 'markdown', 'md', 'text', 'plaintext']);
 const MARKDOWN_MARKER = /(\*\*|^#{1,6}\s|^[-*]\s|^\d+\.\s|`)/m;
@@ -387,15 +415,70 @@ export class AssistantView extends LitElement {
                 return rendered;
             } catch (error) {
                 console.warn('Error parsing markdown:', error);
-                return content;
+                return this.sanitizeHtml(content);
             }
         }
-        return content;
+        return this.sanitizeHtml(content);
+    }
+
+    // Walks a parsed tree in place. Runs before wrapWordsInSpans adds its own markup, so the
+    // data-word spans it injects are not themselves stripped.
+    sanitizeDom(root) {
+        for (const node of Array.from(root.childNodes)) {
+            if (node.nodeType === Node.COMMENT_NODE) {
+                node.remove();
+                continue;
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) continue;
+
+            const tag = node.tagName;
+
+            if (STRIPPED_TAGS.has(tag)) {
+                node.remove();
+                continue;
+            }
+
+            if (!ALLOWED_TAGS.has(tag)) {
+                this.sanitizeDom(node);
+                node.replaceWith(...Array.from(node.childNodes));
+                continue;
+            }
+
+            const allowed = ALLOWED_ATTRIBUTES[tag];
+            for (const attribute of Array.from(node.attributes)) {
+                const name = attribute.name.toLowerCase();
+                if (!allowed || !allowed.has(name)) {
+                    node.removeAttribute(attribute.name);
+                    continue;
+                }
+
+                const value = attribute.value.trim();
+                const valid =
+                    name === 'title' ||
+                    name === 'alt' ||
+                    (name === 'href' && SAFE_HREF.test(value)) ||
+                    (name === 'src' && SAFE_SRC.test(value)) ||
+                    (name === 'class' && SAFE_CLASS.test(value)) ||
+                    (name === 'align' && SAFE_ALIGN.test(value));
+
+                if (!valid) node.removeAttribute(attribute.name);
+            }
+
+            this.sanitizeDom(node);
+        }
+    }
+
+    // Used on the paths that bypass marked, where the raw string would otherwise reach innerHTML.
+    sanitizeHtml(html) {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        this.sanitizeDom(doc.body);
+        return doc.body.innerHTML;
     }
 
     wrapWordsInSpans(html) {
         const parser = new DOMParser();
         const doc = parser.parseFromString(html, 'text/html');
+        this.sanitizeDom(doc.body);
         const tagsToSkip = ['PRE'];
 
         function wrap(node) {
