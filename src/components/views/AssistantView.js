@@ -1,5 +1,9 @@
 import { html, css, LitElement } from '../../assets/lit-core-2.7.4.min.js';
 
+// Fence languages that indicate a model wrapped prose rather than emitted real code.
+const WRAPPER_FENCE_LANGUAGES = new Set(['', 'markdown', 'md', 'text', 'plaintext']);
+const MARKDOWN_MARKER = /(\*\*|^#{1,6}\s|^[-*]\s|^\d+\.\s|`)/m;
+
 export class AssistantView extends LitElement {
     static styles = css`
         :host {
@@ -18,6 +22,7 @@ export class AssistantView extends LitElement {
         .response-container {
             flex: 1;
             overflow-y: auto;
+            overflow-wrap: break-word;
             font-size: var(--response-font-size, 15px);
             line-height: var(--line-height);
             background: var(--bg-app);
@@ -39,6 +44,8 @@ export class AssistantView extends LitElement {
 
         .response-container [data-word] {
             display: inline-block;
+            max-width: 100%;
+            overflow-wrap: anywhere;
         }
 
         /* ── Markdown ── */
@@ -98,8 +105,12 @@ export class AssistantView extends LitElement {
             border: 1px solid var(--border);
             border-radius: var(--radius-md);
             padding: var(--space-md);
-            overflow-x: auto;
             margin: 0.8em 0;
+            /* The overlay is a narrow always-on-top window, so horizontally scrolling a code
+               block is unusable. Wrap long lines instead, and break tokens with no spaces. */
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            overflow-x: auto;
         }
 
         .response-container pre code {
@@ -337,6 +348,32 @@ export class AssistantView extends LitElement {
             : `Listening to your ${profileNames[this.selectedProfile] || 'session'}...`;
     }
 
+    // Models sometimes wrap an entire answer in a ```markdown fence. marked then renders the
+    // whole response as a single <pre>, which shows literal ** markers and scrolls sideways
+    // instead of wrapping. Strip that outer fence before parsing.
+    unwrapWrapperFence(content) {
+        const trimmed = content.trim();
+        const opening = trimmed.match(/^(`{3,}|~{3,})([^\n]*)\n/);
+        if (!opening) return content;
+
+        const [openingLine, fence, info] = opening;
+        const language = info.trim().toLowerCase();
+        if (!WRAPPER_FENCE_LANGUAGES.has(language)) return content;
+
+        // The closing fence has to end the response. If it does not, this is a real code block
+        // followed by prose and unwrapping would mangle it. While a response is still streaming
+        // the closing fence has not arrived yet, so an unterminated fence unwraps too.
+        const body = trimmed.slice(openingLine.length);
+        const closing = body.match(new RegExp('\\n[ \\t]*' + fence[0] + '{' + fence.length + ',}[ \\t]*$'));
+        const inner = closing ? body.slice(0, closing.index) : body;
+
+        if (inner.includes(fence)) return content;
+        // An untagged fence around something with no markdown in it is most likely real code.
+        if (language === '' && !MARKDOWN_MARKER.test(inner)) return content;
+
+        return inner;
+    }
+
     renderMarkdown(content) {
         if (typeof window !== 'undefined' && window.marked) {
             try {
@@ -345,7 +382,7 @@ export class AssistantView extends LitElement {
                     gfm: true,
                     sanitize: false,
                 });
-                let rendered = window.marked.parse(content);
+                let rendered = window.marked.parse(this.unwrapWrapperFence(content));
                 rendered = this.wrapWordsInSpans(rendered);
                 return rendered;
             } catch (error) {
