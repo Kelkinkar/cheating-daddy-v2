@@ -1,4 +1,4 @@
-const { GoogleGenAI, Modality } = require('@google/genai');
+const { GoogleGenAI } = require('@google/genai');
 const { BrowserWindow, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const { saveDebugAudio } = require('../audioUtils');
@@ -16,6 +16,7 @@ const {
 const { PROVIDERS, buildChatRequest, streamChatCompletion, stripThinkingTags } = require('./openaiCompatible');
 const { connectCloud, sendCloudAudio, sendCloudText, sendCloudImage, closeCloud, isCloudActive, setOnTurnComplete } = require('./cloud');
 const { startTransportLog, logTransportEvent, closeTransportLog } = require('./transportLogger');
+const { isTranscriptionModel, buildLiveConfig } = require('./liveConfig');
 const { createAnswerThread, isFollowUp, buildContinuationMessage, composeThreadText, isNonSpeech } = require('./answerThread');
 
 // Lazy-loaded to avoid circular dependency (localai.js imports from gemini.js)
@@ -82,6 +83,8 @@ function emptyResponseMessage(provider, finishReason) {
 
     return `${provider.label} returned an empty response twice in a row (finish reason: ${finishReason || 'unknown'}). This is usually a flaky upstream provider rather than a bad request. Ask again, or try a different model in Home → AI responses.`;
 }
+
+const DEFAULT_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
 
 // Reconnection variables
 let isUserClosing = false;
@@ -716,9 +719,17 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         initializeNewSession(profile, customPrompt);
     }
 
+    // A transcription-only model never answers, so without an answer provider fall back to the
+    // default native-audio model rather than a session that stays silent.
+    let liveModel = getConfig().geminiLiveModel;
+    if (isTranscriptionModel(liveModel) && !getAnswerProvider()) {
+        console.warn(`${liveModel} only transcribes and no answer provider is set; using ${DEFAULT_LIVE_MODEL}`);
+        liveModel = DEFAULT_LIVE_MODEL;
+    }
+
     try {
         const session = await client.live.connect({
-            model: getConfig().geminiLiveModel,
+            model: liveModel,
             callbacks: {
                 onopen: function () {
                     logTransportEvent('gemini.live.opened', {});
@@ -807,23 +818,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     }
                 },
             },
-            config: {
-                responseModalities: [Modality.AUDIO],
-                proactivity: { proactiveAudio: true },
-                outputAudioTranscription: {},
-                tools: enabledTools,
-                // Enable speaker diarization
-                inputAudioTranscription: {
-                    enableSpeakerDiarization: true,
-                    minSpeakerCount: 2,
-                    maxSpeakerCount: 2,
-                },
-                contextWindowCompression: { slidingWindow: {} },
-                speechConfig: { languageCode: language },
-                systemInstruction: {
-                    parts: [{ text: systemPrompt }],
-                },
-            },
+            config: buildLiveConfig({ model: liveModel, tools: enabledTools, systemPrompt, language }),
         });
 
         isInitializingSession = false;

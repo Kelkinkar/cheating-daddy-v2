@@ -8,9 +8,10 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
-const { GoogleGenAI, Modality } = require('@google/genai');
+const { GoogleGenAI } = require('@google/genai');
 const { getCredentials, getConfig } = require('../src/storage');
 const { getSystemPrompt } = require('../src/utils/prompts');
+const { buildLiveConfig } = require('../src/utils/liveConfig');
 
 const SAMPLE_RATE = 24000; // matches src/utils/renderer.js
 const CHUNK_MS = 100; // renderer sends ~100ms chunks
@@ -65,22 +66,12 @@ function writeWav(file, pcm) {
 }
 
 function liveConfig(silenceDurationMs) {
-    const config = {
-        responseModalities: [Modality.AUDIO],
-        proactivity: { proactiveAudio: true },
-        outputAudioTranscription: {},
-        inputAudioTranscription: { enableSpeakerDiarization: true, minSpeakerCount: 2, maxSpeakerCount: 2 },
-        contextWindowCompression: { slidingWindow: {} },
-        speechConfig: { languageCode: 'en-US' },
-        systemInstruction: { parts: [{ text: getSystemPrompt('interview', '', false) }] },
-    };
-    // Transcription-only models reject an AUDIO response and have nothing to say anyway.
-    if (/transcribe/.test(arg('live-model', ''))) {
-        config.responseModalities = [Modality.TEXT];
-        delete config.proactivity;
-        delete config.outputAudioTranscription;
-        delete config.speechConfig;
-    }
+    const config = buildLiveConfig({
+        model: arg('live-model', getConfig().geminiLiveModel),
+        tools: [],
+        systemPrompt: getSystemPrompt('interview', '', false),
+        language: 'en-US',
+    });
     if (silenceDurationMs !== 'default') {
         config.realtimeInputConfig = { automaticActivityDetection: { silenceDurationMs: Number(silenceDurationMs) } };
     }

@@ -214,3 +214,13 @@ test('the first fragment of a question warms the provider connection once', asyn
     requests[0].finish();
     await tick();
 });
+
+test('a transcription-model utterance is sent on its generationComplete', async () => {
+    input('What is Kubernetes?');
+    liveCallbacks.onmessage({ serverContent: { generationComplete: true } });
+    await tick();
+    assert.equal(requests.length, 1);
+    assert.equal(lastUserMessage(requests[0]), 'What is Kubernetes?');
+    requests[0].finish();
+    await tick();
+});
