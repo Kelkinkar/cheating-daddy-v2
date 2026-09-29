@@ -170,9 +170,18 @@ function initializeStorage() {
 
 // ============ CONFIG ============
 
+// Model names come from free-text inputs, so a cleared field is saved as ''. Fall back to the default
+// instead of handing the SDK a blank model ("model is required and must be a string").
+const MODEL_CONFIG_KEYS = ['geminiLiveModel', 'groqModel', 'groqImageModel', 'openrouterModel', 'openrouterImageModel'];
+
 function getConfig() {
     const saved = readJsonFile(getConfigPath(), {});
-    return { ...DEFAULT_CONFIG, ...saved };
+    const config = { ...DEFAULT_CONFIG, ...saved };
+    for (const key of MODEL_CONFIG_KEYS) {
+        const value = typeof config[key] === 'string' ? config[key].trim() : '';
+        config[key] = value || DEFAULT_CONFIG[key];
+    }
+    return config;
 }
 
 function setConfig(config) {

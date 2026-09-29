@@ -34,7 +34,8 @@ test('a fresh install defaults to the transcription model', () => {
     const fs = require('node:fs');
     const os = require('node:os');
     const path = require('node:path');
-    process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'fresh-home-'));
+    // os.homedir() reads HOME on POSIX but USERPROFILE on Windows.
+    process.env.HOME = process.env.USERPROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'fresh-home-'));
     const { getConfig } = require('../src/storage');
     assert.equal(getConfig().geminiLiveModel, 'gemini-3.5-transcribe-live');
 });
