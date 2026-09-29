@@ -60,7 +60,12 @@ Module._load = function (request, parent, isMain) {
 
 // Each provider request gets a stream the test finishes explicitly, so "still streaming" is controllable.
 const requests = [];
+const warmups = [];
 global.fetch = async (url, options) => {
+    if (!url.endsWith('/chat/completions')) {
+        warmups.push(url);
+        return new Response('{}', { status: 200 });
+    }
     let controller;
     const body = new ReadableStream({ start: c => (controller = c) });
     const request = {
@@ -104,6 +109,7 @@ test.after(() => {
 
 test.beforeEach(() => {
     requests.length = 0;
+    warmups.length = 0;
     rendered.length = 0;
     clockOffset += 60000; // far past any grace window, so each test starts a fresh card
 });
@@ -194,6 +200,17 @@ test('without a Gemini reply the settle timer still sends the question', async (
     assert.equal(requests.length, 0);
     await new Promise(resolve => setTimeout(resolve, 1600));
     assert.equal(requests.length, 1);
+    requests[0].finish();
+    await tick();
+});
+
+test('the first fragment of a question warms the provider connection once', async () => {
+    input(' How');
+    input(' would you scale this?');
+    await tick();
+    assert.deepEqual(warmups, ['https://openrouter.ai/api/v1/key']);
+    modelStarts();
+    await tick();
     requests[0].finish();
     await tick();
 });

@@ -256,6 +256,22 @@ function getAnswerProvider() {
     return null;
 }
 
+// Node's fetch drops idle keep-alive sockets after ~4s and questions are further apart than that,
+// so every answer paid a fresh TLS handshake: measured 408ms cold vs 132ms warm to OpenRouter.
+// Opening the socket while the interviewer is still talking takes that off the critical path.
+const WARMUP_MIN_INTERVAL_MS = 3000;
+let lastWarmupAt = 0;
+
+function warmAnswerProviderConnection() {
+    if (Date.now() - lastWarmupAt < WARMUP_MIN_INTERVAL_MS) return;
+    const provider = getAnswerProvider();
+    if (provider !== PROVIDERS.openrouter) return;
+    lastWarmupAt = Date.now();
+    fetch(`${provider.baseUrl}/key`, { headers: { Authorization: `Bearer ${getOpenRouterApiKey()}` } })
+        .then(response => response.arrayBuffer())
+        .catch(() => {});
+}
+
 function clearTranscriptionSettleTimer() {
     if (transcriptionSettleTimer) {
         clearTimeout(transcriptionSettleTimer);
@@ -711,6 +727,10 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                 onmessage: function (message) {
                     console.log('----------------', message);
                     logTransportEvent('gemini.live.message', message);
+
+                    if (message.serverContent?.inputTranscription && currentTranscription === '') {
+                        warmAnswerProviderConnection();
+                    }
 
                     // Handle input transcription (what was spoken)
                     if (message.serverContent?.inputTranscription?.results) {
