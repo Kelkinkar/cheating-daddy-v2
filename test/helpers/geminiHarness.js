@@ -12,11 +12,12 @@ function loadGeminiWithStubs() {
 
     const harness = {
         rendered: [],
-        // One entry per live.connect call: { callbacks, audio: [], texts: [], closed }.
+        // One entry per live.connect call: { callbacks, config, audio: [], texts: [], closed }.
         sessions: [],
         requests: [],
         warmups: [],
         failNextConnect: false,
+        config: { openrouterModel: 'openai/gpt-6-luna', geminiLiveModel: 'live-model', disableGroqThinking: false },
     };
 
     const stubs = {
@@ -32,12 +33,12 @@ function loadGeminiWithStubs() {
             GoogleGenAI: class {
                 constructor() {
                     this.live = {
-                        connect: async ({ callbacks }) => {
+                        connect: async ({ callbacks, config }) => {
                             if (harness.failNextConnect) {
                                 harness.failNextConnect = false;
                                 throw new Error('connect failed');
                             }
-                            const record = { callbacks, audio: [], texts: [], closed: false };
+                            const record = { callbacks, config, audio: [], texts: [], closed: false };
                             harness.sessions.push(record);
                             return {
                                 sendRealtimeInput: async input => {
@@ -60,7 +61,7 @@ function loadGeminiWithStubs() {
             getOpenRouterApiKey: () => 'test-key',
             getGroqApiKey: () => '',
             getApiKey: () => 'gemini-key',
-            getConfig: () => ({ openrouterModel: 'openai/gpt-6-luna', geminiLiveModel: 'live-model', disableGroqThinking: false }),
+            getConfig: () => harness.config,
             getAvailableModel: () => 'x',
             incrementLimitCount() {},
             incrementCharUsage() {},

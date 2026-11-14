@@ -734,6 +734,11 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         liveModel = NATIVE_AUDIO_FALLBACK_MODEL;
     }
 
+    // A transcription-only model never answers, so the user context is of no use to it, and a large
+    // one (a whole rulebook) makes session start fail with "exceeded your current quota". The
+    // answer provider still gets it through currentSystemPrompt.
+    const liveSystemPrompt = isTranscriptionModel(liveModel) ? getSystemPrompt(profile, '', googleSearchEnabled) : systemPrompt;
+
     // Per-connection state. Callbacks of a retired session must not drive reconnection.
     const liveSession = { session: null, retired: false, handingOff: false };
 
@@ -838,7 +843,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     }
                 },
             },
-            config: buildLiveConfig({ model: liveModel, tools: enabledTools, systemPrompt, language }),
+            config: buildLiveConfig({ model: liveModel, tools: enabledTools, systemPrompt: liveSystemPrompt, language }),
         });
 
         liveSession.session = session;
